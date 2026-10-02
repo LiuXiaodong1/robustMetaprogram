@@ -45,6 +45,39 @@ core, so about 3 minutes per sample for ranks 4–9 × 10 restarts. Fits are cac
 threshold and leave-one-study-out perturbations are free. Seed, rank, universe, centring,
 bootstrap and decoy runs each cost one more pass over the cohort. Start with 100–200 tumours.
 
+## Demo on the toy cohort
+
+`python scripts/demo_sim.py --out results/demo --n-jobs 4` runs P1 with 3CA defaults (ranks 4–9, 10 restarts,
+full perturbation grid, 3 decoys) on `mpaudit.sim`: 10 tumours, 16 samples, about 5,000 cells and 1,500 genes,
+with planted programs and nuisance. It takes about 16 minutes on 4 cores. Results are true by
+construction; they show that each axis responds to what it was built for.
+
+| MP | Planted as | Decoy recruitment | TME partial R² (null q95) | Protocol loss beyond null | Arm (q) | Flagged |
+|---|---|---|---|---|---|---|
+| MP1 | hypoxia (biology) | 0 | 0.32 (0.35), negative | 0% | – | no |
+| MP2 | cycle (biology) | 0 | 0.09 (0.42) | 25% | – | no |
+| MP3 | 3× focal gain on 7q in a subclone (genetic) | **1.0** | 0.07 (0.36) | 0% | **7q (9e-32)** | yes |
+| MP4 | EMT (biology; more prevalent under fixation) | 0 | 0.36 (0.51) | 0% (gain +0.26) | – | no |
+| MP5 | ambient RNA + doublets (technical) | **1.0** | 0.03 (0.36) | 0% | – | yes |
+| MP6 | dissociation stress (technical) | 0 | **0.99 (0.66)** | **100%** | – | yes |
+| MP7 | IFN, also in TME cells (TME-shared biology) | 0 | **0.49 (0.46)** | 25% | – | yes |
+
+Verdict GO (4 flagged MPs). Note MP7: the A1 flag alone cannot tell TME-shared biology from a technical
+artefact. The protocol axis separates them here (stress is lost under fixation; IFN is not), which is why the
+full method types provenance from several axes rather than one.
+
+Instability of the reference MPs on this cohort (mean recall per perturbation type): universe 1.00,
+seed 0.95, thresholds 0.93, ranks 0.76, cell bootstrap 0.67, leave-one-study-out 0.48, uncentred 0.
+
+**What the demo changed in the code.** The first runs exposed three problems, now fixed:
+1. TME partial R² flagged pure malignant programs (hypoxia, EMT). Sample-level effects shared by both
+   compartments (stress genes landing among control genes; compositional shifts) move every gene set.
+   A1 now requires a positive association that beats expression-matched random gene sets.
+2. Decoys binned continuous nuisance (contamination, doublet score) into tertiles and kept too little of it
+   (contamination recruitment 0). Continuous covariates now enter the decoy's mean model.
+3. A 2× arm-level gain at the toy's expression levels never formed an MP, so the toy plants a 3× focal gain.
+   For real data this hints that arm-level CNAs may rarely form MPs under 3CA-style NMF; pilot P5 quantifies it.
+
 ## Caveats
 
 - **Checked against the original code.** The port was compared line by line with tiroshlab/3ca
