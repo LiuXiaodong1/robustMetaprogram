@@ -28,15 +28,14 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict, curated_a
 
     attach("decoy_recruitment", ["recruitment"])
     attach("tme_covariation", ["partial_r2", "partial_r2_lo", "kappa_ratio_median"])
-    attach("protocol_shift", ["mean_delta_intensity", "frac_beyond_null_intensity"])
+    attach("protocol_shift", ["mean_delta_intensity", "frac_loss_beyond_null_intensity"])
     attach("instability_per_mp", ["recovery_all"])
     attach("positional", ["best_arm", "q", "q_excluding_known_clusters"])
     flags = flags.rename(columns={"q": "positional_q"})
 
     flags["flag_decoy"] = flags["recruitment"] >= rule["recruitment"]
     flags["flag_tme"] = flags["partial_r2"] >= rule["partial_r2"]
-    flags["flag_protocol_loss"] = (flags["mean_delta_intensity"] < 0) & (
-        flags["frac_beyond_null_intensity"] >= rule["protocol_frac_beyond_null"])
+    flags["flag_protocol_loss"] = flags["frac_loss_beyond_null_intensity"] >= rule["protocol_frac_beyond_null"]
     flags["info_unstable"] = flags["recovery_all"] < rule["unstable_recovery"]
     flags["info_positional"] = flags["q_excluding_known_clusters"] < rule["positional_q"]
     flags["curated_artefact"] = False
@@ -80,7 +79,7 @@ def write_summary(path: Path, decision: dict, flags: pd.DataFrame, tables: dict,
         "flags are informational.\n",
         "## Per-MP flags\n",
         _md_table(flags[[c for c in ["mp", "recruitment", "partial_r2", "partial_r2_lo", "kappa_ratio_median",
-                                     "mean_delta_intensity", "frac_beyond_null_intensity", "recovery_all",
+                                     "mean_delta_intensity", "frac_loss_beyond_null_intensity", "recovery_all",
                                      "best_arm", "q_excluding_known_clusters", "curated_artefact", "flagged"]
                          if c in flags]]),
     ]

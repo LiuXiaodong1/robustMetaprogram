@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from mpaudit.gavish import GavishParams, cluster_mps, robust_programs
 from mpaudit.nmf import snmf_r
@@ -64,3 +65,41 @@ def test_cluster_mps_groups_and_orders_by_frequency():
     mp = mps[0]
     assert len(mp.members) == 8 and len(mp.genes) == 50 and len(set(mp.genes)) == 50
     assert set(genes((0, 40))) <= set(mp.genes)
+
+
+def test_dead_components_are_skipped():
+    from mpaudit.gavish import SamplePrograms, collect_top
+
+    W = np.zeros((100, 4), dtype=np.float32)
+    W[:10, 0] = 1.0
+    W[10:20, 1] = 1.0
+    W[20:30, 2] = 1.0  # column 3 is dead
+    spg = {"S": SamplePrograms(sample="S", universe=np.array(G[:100]), W={4: W})}
+    top, sample, dead = collect_top(spg, GavishParams(ranks=(4,)))
+    assert dead == 1 and len(top) == 3
+
+
+def test_dendrogram_order_puts_lighter_branch_first():
+    from mpaudit.gavish import dendrogram_order
+
+    ov = np.full((4, 4), 0)
+    np.fill_diagonal(ov, 50)
+    ov[0, 1] = ov[1, 0] = 40   # pair (0,1) is similar
+    ov[2, 3] = ov[3, 2] = 30   # pair (2,3) is similar, lower column means
+    order = list(dendrogram_order(ov, 50))
+    assert sorted(order) == [0, 1, 2, 3]
+    assert set(order[:2]) == {2, 3}  # lighter (lower colMeans) cluster first, as R's reorder()
+
+
+def test_v2_post_filters():
+    from mpaudit.gavish import MP, post_filter
+
+    mps = [MP("a", G[:50], ["s1|r4|1", "s2|r4|1", "s3|r4|1"]),          # 2 studies, one singleton -> drop
+           MP("b", G[:50], ["s1|r4|1", "s4|r4|1", "s2|r4|1", "s3|r4|1"]),  # 2 studies, 2 + 2 -> keep
+           MP("c", G[:50], ["s1|r4|1", "s4|r4|1"])]                       # one study -> drop
+    prog_sample = {p: p.split("|")[0] for m in mps for p in m.members}
+    study = {"s1": "A", "s4": "A", "s2": "B", "s3": "B"}
+    out = post_filter(mps, prog_sample, study, GavishParams(min_studies_per_mp=2))
+    assert [m.members for m in out] == [mps[1].members]
+    with pytest.raises(ValueError):
+        post_filter(mps, prog_sample, None, GavishParams(min_studies_per_mp=2))

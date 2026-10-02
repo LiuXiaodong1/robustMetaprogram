@@ -29,7 +29,7 @@ def main():
     adata, truth = simulate_cohort(seed=args.seed)
     cfg = {
         "keys": KEYS, "counts_layer": "counts", "recurrence_key": "tumour", "n_jobs": args.n_jobs,
-        "gavish": {"nrun": args.nrun},
+        "gavish": {"nrun": args.nrun, "min_genes_per_cell": 0},  # toy cohort has only 1,500 genes
         "decoy": {"n": 3, "strata": ["clone", "doublet_score", "contamination"]},
         "positional": {"cytoband": truth["cytoband"]},
         "protocol": {"reference": "fresh", "test": "fixed"},
@@ -46,7 +46,7 @@ def main():
                      "truth_kind": truth["kinds"][names[j]] if J[i, j] >= 0.2 else "",
                      "jaccard": round(float(J[i, j]), 2),
                      **{c: flags.loc[mp, c] for c in ["recruitment", "partial_r2", "kappa_ratio_median",
-                                                      "mean_delta_intensity", "frac_beyond_null_intensity",
+                                                      "mean_delta_intensity", "frac_loss_beyond_null_intensity",
                                                       "recovery_all", "best_arm", "q_excluding_known_clusters",
                                                       "flagged"] if c in flags}})
     table = pd.DataFrame(rows)

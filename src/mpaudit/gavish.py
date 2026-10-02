@@ -2,8 +2,9 @@
 
 Steps (3CA defaults in brackets; every constant is a field of :class:`GavishParams`):
 
-1. Per sample, malignant cells only: log2(CPM/10 + 1); keep the top genes by mean expression
-   [7,000]; centre each gene; set negatives to zero.
+1. Per sample, malignant cells with >= ``min_genes_per_cell`` detected genes [1,000]:
+   log2(CPM/10 + 1); keep the top genes by mean expression [7,000]; centre each gene; set
+   negatives to zero.
 2. sNMF/R at each rank [4-9], keeping the best of ``nrun`` restarts [10]; each program is
    summarised by its top genes [50].
 3. Robust programs: overlap >= ``intra_min`` [35] with another program of the same sample;
@@ -13,12 +14,20 @@ Steps (3CA defaults in brackets; every constant is a field of :class:`GavishPara
    (needs > ``min_group_size`` [5] partners); programs join while they share >= 10 genes with
    the evolving 50-gene MP list; MP genes = top 50 by frequency, ties broken by NMF weight.
 
-Known differences from the R code, none of which change the logic:
-* NMF optimiser (HALS on the same objective; see :mod:`mpaudit.nmf`).
+Checked against tiroshlab/3ca (``ITH_hallmarks/Generating_MPs/*.R``, ``3CA_v2/MP_analysis_new_batch.R``)
+and renozao/NMF (``R/algorithms-snmf.R``). Remaining differences:
+
+* NMF optimiser and stopping rule (HALS on the same objective; see :mod:`mpaudit.nmf`).
 * Samples are matched exactly (the R code uses ``grep`` on names, which misfires when one
   sample name is a substring of another).
-* Ties are broken by input order rather than by the R code's dendrogram ordering, and gene-name
-  ties use Python string order rather than the R locale's collation.
+* Founder ties follow an average-linkage dendrogram reordered by column means, as in the R code,
+  but scipy's linkage can break exact distance ties differently from R's ``hclust``.
+* The cell filter (>= 1,000 detected genes) is inferred from other 3CA scripts; the cell-QC
+  function the MP script calls (``Return_All_cells_Separated``) is not public.
+* The R code upper-cases gene symbols; this port keeps ``var_names`` as given (only matters when
+  comparing against gene lists with different capitalisation).
+* The 3CA v2 manual removal of 11 MPs cannot be reproduced; label those MPs instead
+  (``typer.labels`` in the P1 config).
 """
 from __future__ import annotations
 
@@ -48,6 +57,7 @@ class GavishParams:
     n_universe: int = 7000
     center: bool = True
     min_cells: int = 50  # minimum malignant cells per sample (an assumption; not verified in 3CA code)
+    min_genes_per_cell: int = 1000  # low-complexity cell filter used across 3CA scripts; 0 disables
     beta: float = 0.01
     eta: float | None = None
     max_iter: int = 1000
@@ -60,9 +70,12 @@ class GavishParams:
     min_intersect_initial: int = 10
     min_intersect_cluster: int = 10
     min_group_size: int = 5
+    sample_order: str = "alphabetical"  # R iterates over NMF output files in list.files order; or "input"
+    founder_order: str = "hclust"       # R ranks founders in dendrogram order; or "input"
     # 3CA v2-style post filters (off by default, i.e. Gavish 2023 core algorithm)
     min_programs_per_mp: int = 0
     min_studies_per_mp: int = 1
+    drop_two_study_singleton: bool = True  # v2: with 2 studies, drop if one study gives a single NMF
 
     def replace(self, **kw) -> "GavishParams":
         if "ranks" in kw:
@@ -103,6 +116,7 @@ class GavishResult:
     program_sample: dict[str, str]
     robust: list[str]
     mps: list[MP]
+    n_dead_programs: int = 0
 
     def mp_sets(self) -> dict[str, list[str]]:
         return {m.name: m.genes for m in self.mps}
@@ -168,11 +182,13 @@ def _fit_job(args):
 
 
 class NMFCache:
-    """Caches per-(sample, rank) NMF bases in memory and optionally on disk.
+    """Caches per-(sample, rank) NMF bases, in memory or (when ``directory`` is set) on disk.
 
-    The key covers everything that changes the fit (data tag, cell subset, gene universe,
-    centring, solver settings, seed), so threshold, clustering and leave-study-out
-    perturbations reuse fits.
+    The key covers everything that changes the fit: a fingerprint of the input (cell barcodes,
+    gene names, counts layer, total counts), a data tag (real or decoy), the gene universe,
+    centring, solver settings and seed. Threshold, clustering and leave-study-out perturbations
+    therefore reuse fits, and a cache directory cannot serve fits from a different dataset.
+    With a directory, fits are not also kept in memory (atlas-scale runs would not fit).
     """
 
     def __init__(self, directory: str | Path | None = None):
@@ -182,8 +198,8 @@ class NMFCache:
             self.dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def key(data_tag: str, subset_tag: str, sample: str, rank: int, p: GavishParams) -> str:
-        parts = (data_tag, subset_tag, sample, rank, p.gene_universe, p.n_universe, p.center,
+    def key(data_tag: str, fingerprint: str, sample: str, rank: int, p: GavishParams) -> str:
+        parts = (data_tag, fingerprint, sample, rank, p.gene_universe, p.n_universe, p.center,
                  p.nrun, p.seed, p.beta, p.eta, p.max_iter, p.tol)
         return hashlib.sha1(repr(parts).encode()).hexdigest()
 
@@ -192,13 +208,13 @@ class NMFCache:
             return self.mem[key]
         if self.dir and (self.dir / f"{key}.pkl").exists():
             with open(self.dir / f"{key}.pkl", "rb") as fh:
-                self.mem[key] = pickle.load(fh)
-            return self.mem[key]
+                return pickle.load(fh)
         return None
 
     def put(self, key: str, universe: np.ndarray, W: np.ndarray) -> None:
-        self.mem[key] = (universe, W)
-        if self.dir:
+        if not self.dir:
+            self.mem[key] = (universe, W)
+        else:
             with open(self.dir / f"{key}.pkl", "wb") as fh:
                 pickle.dump((universe, W), fh, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -222,10 +238,15 @@ def compute_programs(
     mal = malignant_mask(adata, keys)
     obs_sample = adata.obs[keys.sample].astype(str).to_numpy()
     genes = np.asarray(adata.var_names.astype(str))
-    subset_tag = f"frac{cell_fraction}-seed{subset_seed}" if cell_fraction < 1 else "all"
+    obs_names = np.asarray(adata.obs_names.astype(str))
+    gene_hash = hashlib.sha1("\x1f".join(genes).encode()).hexdigest()[:16]
+    if params.min_genes_per_cell > 0:
+        detected = np.diff((counts > 0).tocsr().indptr)
+        mal = mal & (detected >= params.min_genes_per_cell)
     order = samples if samples is not None else list(pd.unique(obs_sample[mal]))
 
     result: dict[str, SamplePrograms] = {}
+    fingerprints: dict[str, str] = {}
     jobs = []
     for s in order:
         idx = np.flatnonzero(mal & (obs_sample == s))
@@ -234,10 +255,13 @@ def compute_programs(
             idx = np.sort(rng.choice(idx, size=max(1, int(round(cell_fraction * idx.size))), replace=False))
         if idx.size < params.min_cells:
             continue
+        fp = hashlib.sha1(("\x1f".join(obs_names[idx]) + gene_hash + str(counts_layer)
+                           + f"{counts[idx].sum():.10g}").encode()).hexdigest()[:20]
+        fingerprints[s] = fp
         sp_obj = SamplePrograms(sample=s, universe=np.array([], dtype=object))
         missing = []
         for r in params.ranks:
-            hit = cache.get(NMFCache.key(data_tag, subset_tag, s, r, params))
+            hit = cache.get(NMFCache.key(data_tag, fp, s, r, params))
             if hit is None:
                 missing.append(r)
             else:
@@ -254,7 +278,7 @@ def compute_programs(
             outputs = [_fit_job(j) for j in jobs]
         for s, universe, Ws in outputs:
             for r, W in Ws.items():
-                cache.put(NMFCache.key(data_tag, subset_tag, s, r, params), universe, W)
+                cache.put(NMFCache.key(data_tag, fingerprints[s], s, r, params), universe, W)
                 result[s].W[r] = W
             result[s].universe = universe
             result[s]._index = None
@@ -268,16 +292,26 @@ def top_genes(weights: np.ndarray, universe: np.ndarray, n: int) -> list[str]:
     return [str(g) for g in universe[order]]
 
 
-def collect_top(sample_programs: dict[str, SamplePrograms], params: GavishParams) -> tuple[dict, dict]:
-    top, program_sample = {}, {}
-    for s, spg in sample_programs.items():
+def collect_top(sample_programs: dict[str, SamplePrograms], params: GavishParams) -> tuple[dict, dict, int]:
+    """Top genes per program, in R's column order (sample, then rank, then program index).
+
+    All-zero basis columns (dead components) are skipped: their "top genes" would just be the
+    sample's highest-mean genes, identical across ranks and samples.
+    """
+    top, program_sample, dead = {}, {}, 0
+    samples = sorted(sample_programs) if params.sample_order == "alphabetical" else list(sample_programs)
+    for s in samples:
+        spg = sample_programs[s]
         for r in params.ranks:
             W = spg.W[r]
             for j in range(W.shape[1]):
+                if not np.any(W[:, j] > 0):
+                    dead += 1
+                    continue
                 pid = program_id(s, r, j)
                 top[pid] = top_genes(W[:, j], spg.universe, params.n_top)
                 program_sample[pid] = s
-    return top, program_sample
+    return top, program_sample, dead
 
 
 def _overlap(sets_a: list[set], sets_b: list[set]) -> np.ndarray:
@@ -335,6 +369,40 @@ def robust_programs(
     return final
 
 
+def dendrogram_order(ov: np.ndarray, n_top: int) -> np.ndarray:
+    """Leaf order of R's ``reorder(as.dendrogram(hclust(as.dist(n_top - ov), "average")), colMeans(ov))``.
+
+    At every node the child with the smaller summed weight goes first (ties keep the left child
+    first). Exact distance ties may resolve differently from R's ``hclust``.
+    """
+    from scipy.cluster.hierarchy import linkage, to_tree
+    from scipy.spatial.distance import squareform
+
+    n = ov.shape[0]
+    if n < 3:
+        return np.arange(n)
+    D = (n_top - ov).astype(float)
+    np.fill_diagonal(D, 0.0)
+    D = np.maximum(D, 0.0)
+    root = to_tree(linkage(squareform(D, checks=False), method="average"))
+    w = ov.mean(axis=0)
+    leaves, weight = {}, {}
+    stack = [(root, False)]
+    while stack:  # iterative post-order (deep trees would exceed Python's recursion limit)
+        node, done = stack.pop()
+        if node.is_leaf():
+            leaves[node.id], weight[node.id] = [node.id], float(w[node.id])
+        elif not done:
+            stack += [(node, True), (node.get_right(), False), (node.get_left(), False)]
+        else:
+            a, b = node.get_left().id, node.get_right().id
+            if weight[b] < weight[a]:
+                a, b = b, a
+            leaves[node.id] = leaves.pop(a) + leaves.pop(b)
+            weight[node.id] = weight.pop(a) + weight.pop(b)
+    return np.array(leaves[root.id])
+
+
 def cluster_mps(
     top: dict[str, list[str]],
     weight_of,
@@ -342,8 +410,10 @@ def cluster_mps(
 ) -> list[MP]:
     """Port of the 3CA greedy MP clustering.
 
-    ``top`` maps the robust program ids (in order) to their top genes; ``weight_of(pid, genes)``
-    returns those genes' NMF weights in the program's full basis (NaN if absent).
+    ``top`` maps the robust program ids, in R's column order (sample, rank, index), to their top
+    genes; ``weight_of(pid, genes)`` returns those genes' NMF weights in the program's full basis
+    (NaN if absent). Candidates are scanned in ``top`` order; founders are ranked in dendrogram
+    order when ``params.founder_order == "hclust"``, as in the R code.
     """
     ids = list(top)
     n = len(ids)
@@ -354,9 +424,10 @@ def cluster_mps(
     ov = _overlap(sets, sets)
     active = np.ones(n, dtype=bool)
     pool = list(range(n))
+    seq = dendrogram_order(ov, n_top) if params.founder_order == "hclust" else np.arange(n)
 
     def ranked_founders():
-        idx = np.flatnonzero(active)
+        idx = seq[active[seq]]
         if idx.size == 0:
             return idx, np.array([], dtype=int)
         cnt = (ov[np.ix_(idx, idx)] >= params.min_intersect_initial).sum(axis=0) - 1
@@ -410,15 +481,20 @@ def cluster_mps(
 
 def post_filter(mps: list[MP], program_sample: dict[str, str], study_of_sample: dict[str, str] | None,
                 params: GavishParams) -> list[MP]:
-    """3CA v2-style filters: minimum programs per MP and minimum studies per MP."""
+    """3CA v2 filters (``MP_analysis_new_batch.R``): minimum studies per MP; with exactly two
+    studies, drop the MP if one study contributes a single NMF; minimum NMFs per MP."""
+    if params.min_studies_per_mp > 1 and study_of_sample is None:
+        raise ValueError("min_studies_per_mp > 1 needs keys.study")
     out = []
     for m in mps:
+        if params.min_studies_per_mp > 1:
+            per_study = Counter(study_of_sample.get(program_sample[p], "") for p in m.members)
+            if len(per_study) < params.min_studies_per_mp:
+                continue
+            if params.drop_two_study_singleton and len(per_study) == 2 and 1 in per_study.values():
+                continue
         if len(m.members) < params.min_programs_per_mp:
             continue
-        if study_of_sample is not None and params.min_studies_per_mp > 1:
-            studies = {study_of_sample.get(program_sample[p], "") for p in m.members}
-            if len(studies) < params.min_studies_per_mp:
-                continue
         out.append(m)
     for i, m in enumerate(out):
         m.name = f"MP{i + 1}"
@@ -435,9 +511,10 @@ def assemble(
 ) -> GavishResult:
     """Robust-program filter and MP clustering on precomputed NMF bases."""
     kept = {s: v for s, v in sample_programs.items() if s not in drop_samples}
-    top, program_sample = collect_top(kept, params)
+    top, program_sample, dead = collect_top(kept, params)
     robust = robust_programs(top, program_sample, params, unit_of_sample)
-    robust_top = {p: top[p] for p in robust}
+    robust_set = set(robust)
+    robust_top = {p: g for p, g in top.items() if p in robust_set}  # R column order
 
     def weight_of(pid: str, genes: list[str]) -> np.ndarray:
         s, r, j = pid.rsplit("|", 2)
@@ -448,7 +525,8 @@ def assemble(
 
     mps = cluster_mps(robust_top, weight_of, params)
     mps = post_filter(mps, program_sample, study_of_sample, params)
-    return GavishResult(params=params, top=top, program_sample=program_sample, robust=robust, mps=mps)
+    return GavishResult(params=params, top=top, program_sample=program_sample, robust=list(robust_top),
+                        mps=mps, n_dead_programs=dead)
 
 
 def run_gavish(

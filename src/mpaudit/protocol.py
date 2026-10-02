@@ -51,7 +51,11 @@ def per_sample_levels(
 
 
 def protocol_shift(levels: pd.DataFrame, protocol_a: str, protocol_b: str) -> pd.DataFrame:
-    """Paired ``b - a`` differences per MP, against same-protocol replicate differences."""
+    """Paired ``b - a`` differences per MP, against same-protocol replicate differences.
+
+    ``frac_loss_beyond_null`` is the fraction of paired tumours whose drop exceeds the 95th
+    percentile of absolute same-protocol differences (one-sided); likewise for gains.
+    """
     out = []
     for mp, d in levels.groupby("mp"):
         deltas, nulls = {"intensity": [], "prevalence": []}, {"intensity": [], "prevalence": []}
@@ -67,8 +71,11 @@ def protocol_shift(levels: pd.DataFrame, protocol_a: str, protocol_b: str) -> pd
         rec = {"mp": mp, "n_paired_tumours": len(deltas["intensity"]), "n_null_pairs": len(nulls["intensity"])}
         for m in deltas:
             dv, nv = np.array(deltas[m]), np.abs(np.array(nulls[m]))
+            q = float(np.quantile(nv, 0.95)) if nv.size else np.nan
+            ok = dv.size and nv.size
             rec[f"mean_delta_{m}"] = float(dv.mean()) if dv.size else np.nan
-            rec[f"null_abs_q95_{m}"] = float(np.quantile(nv, 0.95)) if nv.size else np.nan
-            rec[f"frac_beyond_null_{m}"] = float(np.mean(np.abs(dv) > rec[f"null_abs_q95_{m}"])) if dv.size and nv.size else np.nan
+            rec[f"null_abs_q95_{m}"] = q
+            rec[f"frac_loss_beyond_null_{m}"] = float(np.mean(dv < -q)) if ok else np.nan
+            rec[f"frac_gain_beyond_null_{m}"] = float(np.mean(dv > q)) if ok else np.nan
         out.append(rec)
     return pd.DataFrame(out)

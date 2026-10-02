@@ -59,7 +59,7 @@ def test_run_p1_end_to_end(small, tmp_path):
     adata, truth = small
     cfg = {
         "keys": KEYS, "counts_layer": "counts", "recurrence_key": "tumour",
-        "gavish": {"ranks": [3, 4], "nrun": 1, "max_iter": 200},
+        "gavish": {"ranks": [3, 4], "nrun": 1, "max_iter": 200, "min_genes_per_cell": 0},
         "instability": {"seeds": [1], "n_boot": 1},
         "decoy": {"n": 1, "strata": ["clone"]},
         "tme": {"n_boot": 20},

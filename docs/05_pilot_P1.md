@@ -47,13 +47,21 @@ bootstrap and decoy runs each cost one more pass over the cohort. Start with 100
 
 ## Caveats
 
-- **NMF parity.** `mpaudit.nmf` minimises the same sNMF/R objective as R's `NMF::nmf(method = "snmf/r")`
-  but with a different optimiser (HALS). Seed-to-seed results therefore differ from the R code.
-  Contrasts between perturbations inside `mpaudit` are like-for-like. Before quoting absolute numbers
-  for the 3CA pipeline, check agreement with the original R code on a few samples.
-- **Gavish port details.** Matching samples by exact name (the R code uses `grep`), tie-breaking order
-  and the minimum malignant cells per sample (default 50) differ or are assumptions; see the
-  `mpaudit.gavish` docstring.
+- **Checked against the original code.** The port was compared line by line with tiroshlab/3ca
+  (`ITH_hallmarks/Generating_MPs/*.R`, `3CA_v2/MP_analysis_new_batch.R`) and with R's NMF package
+  (`R/algorithms-snmf.R`). Matched: transform, per-sample gene universe, centring, the sNMF/R
+  objective (including R's eta² ridge on W), random restarts on zero rows of H, best-of-10 selection
+  by R's objective, the robust-program filter, the clustering rules, sample order (alphabetical),
+  candidate order (sample, then rank), founder ties in dendrogram order, and the v2 post-filters
+  (≥ 2 studies; drop two-study MPs where one study gives a single NMF; ≥ 5 NMFs).
+- **NMF parity.** The optimiser (HALS) and stopping rule differ from R's exact alternating NNLS, so
+  seed-to-seed results differ. Contrasts between perturbations inside `mpaudit` are like-for-like.
+  Before quoting absolute numbers for the 3CA pipeline, check agreement with the R code on a few samples.
+- **Not reproducible from public code.** The cell-QC step the MP script calls (`Return_All_cells_Separated`)
+  is not public. The ≥ 1,000 detected-genes filter (`min_genes_per_cell`) is taken from other 3CA scripts,
+  and the minimum of 50 malignant cells per sample is an assumption. The 11 MPs removed by hand in 3CA v2
+  cannot be reproduced; label them via `typer.labels`. Exact distance ties in the dendrogram may resolve
+  differently from R's `hclust`. Gene symbols are not upper-cased as in R.
 - **Decoy leakage.** Strata leak a little real signal (per-stratum means carry each program's share).
   Depth is therefore modelled continuously by default, and binned strata are capped at ~50 cells.
 - **Expression-only CNA.** A positional flag is a prompt for allele-aware follow-up (Numbat), not proof

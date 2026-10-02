@@ -27,6 +27,7 @@ gavish:                     # 3CA defaults; listed here to make the audited sett
   min_group_size: 5
   min_programs_per_mp: 5    # 3CA v2 post filters
   min_studies_per_mp: 2
+  min_genes_per_cell: 1000  # low-complexity cell filter used across 3CA scripts
 
 instability:
   enabled: true

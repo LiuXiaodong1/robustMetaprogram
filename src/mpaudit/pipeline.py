@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .compare import match_sets
 from .data import Keys, read_gmt, sample_map, write_gmt
 from .decoy import decoy_recruitment
 from .gavish import GavishParams, NMFCache, run_gavish
@@ -89,8 +90,17 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
         inst = run_instability(adata, keys, params, perts, counts_layer=layer, cache=cache, recurrence_key=rk,
                                min_jaccard=cfg["min_jaccard"], n_jobs=n_jobs, reference=reference, log=log)
         tables["instability_runs"] = inst.summary
-        tables["instability_per_mp"] = inst.per_mp
         tables["gene_stability"] = inst.genes
+        if cfg["mps"] == "rederive":
+            tables["instability_per_mp"] = inst.per_mp
+        else:
+            # audited MPs come from a GMT: report the recovery of the matching re-derived MP
+            m = match_sets(mp_sets, reference.mp_sets(), cfg["min_jaccard"])
+            per = inst.per_mp.set_index("mp")
+            m["recovery_all"] = [per.loc[a, "recovery_all"] if a else np.nan for a in m["alt"]]
+            tables["instability_rederived_per_mp"] = inst.per_mp
+            tables["instability_per_mp"] = m.rename(columns={"ref": "mp", "alt": "rederived_mp"})[
+                ["mp", "rederived_mp", "jaccard", "recovery_all"]]
 
     if cfg["decoy"]["enabled"] and mp_sets:
         dc = cfg["decoy"]
