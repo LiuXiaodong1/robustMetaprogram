@@ -1,7 +1,9 @@
 """P1 GO/NO-GO decision and the markdown summary.
 
 Decision rule (proposal, pilot P1): GO if at least ``min_mps`` MPs that curators *retained*
-show at least one of: decoy recruitment >= ``recruitment``; TME partial R^2 >= ``partial_r2``;
+show at least one of: decoy recruitment >= ``recruitment``; a positive TME association with
+partial R^2 >= ``partial_r2`` that also exceeds the 95th percentile of expression-matched random
+gene sets;
 a loss under the dissociation-free protocol beyond the same-protocol null in at least
 ``protocol_frac_beyond_null`` of paired tumours. MPs labelled as curated artefacts (e.g. the
 3CA v2 hand-removed MPs) do not count towards GO: rediscovering them is not news.
@@ -27,14 +29,15 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict, curated_a
                 flags[c] = np.nan
 
     attach("decoy_recruitment", ["recruitment"])
-    attach("tme_covariation", ["partial_r2", "partial_r2_lo", "kappa_ratio_median"])
+    attach("tme_covariation", ["partial_r2", "partial_r2_lo", "slope", "null_q95", "kappa_ratio_median"])
     attach("protocol_shift", ["mean_delta_intensity", "frac_loss_beyond_null_intensity"])
     attach("instability_per_mp", ["recovery_all"])
     attach("positional", ["best_arm", "q", "q_excluding_known_clusters"])
     flags = flags.rename(columns={"q": "positional_q"})
 
     flags["flag_decoy"] = flags["recruitment"] >= rule["recruitment"]
-    flags["flag_tme"] = flags["partial_r2"] >= rule["partial_r2"]
+    flags["flag_tme"] = ((flags["partial_r2"] >= rule["partial_r2"]) & (flags["slope"] > 0)
+                         & (flags["partial_r2"] > flags["null_q95"].fillna(-np.inf)))
     flags["flag_protocol_loss"] = flags["frac_loss_beyond_null_intensity"] >= rule["protocol_frac_beyond_null"]
     flags["info_unstable"] = flags["recovery_all"] < rule["unstable_recovery"]
     flags["info_positional"] = flags["q_excluding_known_clusters"] < rule["positional_q"]
@@ -73,12 +76,13 @@ def write_summary(path: Path, decision: dict, flags: pd.DataFrame, tables: dict,
         "# P1 audit summary\n",
         f"**Verdict: {decision['verdict']}**: {decision['n_flagged']} retained MP(s) flagged "
         f"(GO needs >= {decision['min_mps']}). Axes available: {', '.join(decision['axes_available']) or 'none'}.\n",
-        f"Rule: decoy recruitment >= {r['recruitment']}, or TME partial R^2 >= {r['partial_r2']}, or protocol loss "
+        f"Rule: decoy recruitment >= {r['recruitment']}, or a positive TME association with partial R^2 >= "
+        f"{r['partial_r2']} above the random-gene-set null (null_q95), or protocol loss "
         f"beyond the same-protocol null in >= {r['protocol_frac_beyond_null']} of paired tumours. "
         "MPs labelled as curated artefacts are excluded from the count. Instability and positional "
         "flags are informational.\n",
         "## Per-MP flags\n",
-        _md_table(flags[[c for c in ["mp", "recruitment", "partial_r2", "partial_r2_lo", "kappa_ratio_median",
+        _md_table(flags[[c for c in ["mp", "recruitment", "partial_r2", "null_q95", "slope", "kappa_ratio_median",
                                      "mean_delta_intensity", "frac_loss_beyond_null_intensity", "recovery_all",
                                      "best_arm", "q_excluding_known_clusters", "curated_artefact", "flagged"]
                          if c in flags]]),

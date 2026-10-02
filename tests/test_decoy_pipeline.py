@@ -70,3 +70,22 @@ def test_run_p1_end_to_end(small, tmp_path):
     assert out["decision"]["verdict"] in {"GO", "PIVOT", "INCOMPLETE"}
     for f in ["summary.md", "mp_flags.csv", "run_config.json", "typer_features.csv"]:
         assert (tmp_path / f).exists()
+
+
+def test_residual_decoy_keeps_covariate_driven_coexpression(small):
+    adata, truth = small
+    keys = Keys(**KEYS)
+    dec = make_decoy(adata, keys, counts_layer="counts", strata=("clone", "doublet_score", "contamination"), seed=4)
+    X, D = get_counts(adata, "counts"), get_counts(dec, "counts")
+    pos = {g: i for i, g in enumerate(adata.var_names)}
+
+    def k(M, name):
+        idx = [pos[g] for g in truth["sets"][name]]
+        vals = []
+        for s in adata.obs["sample"].unique()[:4]:
+            Y = M[_sample_rows(adata, keys, s)]
+            vals.append(kappa(Y[:, idx].toarray(), np.asarray(Y.sum(axis=1)).ravel()))
+        return np.nanmean(vals)
+
+    assert k(D, "contamination") > 0.6 * k(X, "contamination")  # continuous covariate kept
+    assert k(D, "cycle") < 0.2 * k(X, "cycle")                  # real program destroyed

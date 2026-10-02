@@ -1,23 +1,25 @@
 """Pilot P1b: nuisance-matched decoys ("how much can nuisance manufacture?").
 
-A decoy keeps, per sample and per gene, the count distribution conditional on declared
-nuisance strata (sequencing-depth bins plus any obs columns such as clone, doublet score or an
-ambient-contamination estimate) and destroys all other gene-gene co-expression. Running the
-unmodified MP pipeline on decoys shows which MPs nuisance alone can reproduce.
+A decoy keeps, per sample and per gene, the count distribution conditional on declared nuisance
+(sequencing depth, categorical strata such as CNA clone, and continuous covariates such as a
+doublet score or an ambient-contamination estimate) and destroys all other gene-gene
+co-expression. Running the unmodified MP pipeline on decoys shows which MPs nuisance alone can
+reproduce.
 
 Two methods:
 
 * ``"residual"`` (default): stratified conditional residual permutation (SCRP). Per gene a
-  negative-binomial model with mean ``s_c * p_{g,stratum}`` (``s_c`` = size factor) gives
-  randomised-quantile residuals; residuals are permuted within strata and mapped back through
-  each receiving cell's own distribution, so the continuous depth effect is kept.
-* ``"permute"``: raw counts permuted within strata (exact stratum marginals, coarser depth).
+  negative-binomial model with mean ``s_c * exp(a_{g,stratum} + b_g' z_c)`` (``s_c`` = size
+  factor, ``z_c`` = standardised continuous covariates; Poisson IRLS fit) gives randomised-quantile
+  residuals; residuals are permuted within categorical strata and mapped back through each
+  receiving cell's own distribution, so depth and covariate effects are kept cell by cell.
+* ``"permute"``: raw counts permuted within strata (continuous columns are binned).
 
 Strata leak a little real signal: per-stratum gene means carry the stratum's share of every
 program, so decoy co-expression grows roughly with (number of strata / cells per sample). Depth
-is therefore modelled continuously through ``s_c`` by default (``n_depth_bins=1``), and binned
-strata are capped so each has about ``min_stratum_cells`` cells. Categorical strata (clone,
-doublet class) are used as given; report their sizes.
+is therefore modelled continuously through ``s_c`` by default (``n_depth_bins=1``), continuous
+columns enter the mean model instead of being binned, and binned strata are capped so each has
+about ``min_stratum_cells`` cells. Categorical strata are used as given; report their sizes.
 
 This is an audit of pipelines that do not model nuisance. It carries no FDR claim.
 """
@@ -31,6 +33,22 @@ from scipy import stats
 from .compare import jaccard_matrix
 from .data import Keys, get_counts, malignant_mask, sample_map
 from .gavish import GavishParams, NMFCache, assemble, compute_programs
+
+
+def _is_continuous(v: pd.Series) -> bool:
+    return pd.api.types.is_numeric_dtype(v) and not pd.api.types.is_bool_dtype(v) and v.nunique() > 10
+
+
+def _covariates(obs: pd.DataFrame, cols: tuple[str, ...]) -> np.ndarray:
+    """Standardised continuous covariates (cells x k); constant columns are dropped."""
+    out = []
+    for col in cols:
+        v = pd.to_numeric(obs[col], errors="coerce").to_numpy(dtype=float)
+        v = np.where(np.isfinite(v), v, np.nanmedian(v) if np.isfinite(v).any() else 0.0)
+        sd = v.std()
+        if sd > 0:
+            out.append((v - v.mean()) / sd)
+    return np.column_stack(out) if out else np.zeros((len(obs), 0))
 
 
 def _strata(obs: pd.DataFrame, totals: np.ndarray, strata: tuple[str, ...], n_depth_bins: int, n_cont_bins: int,
@@ -72,13 +90,39 @@ def _nb_dispersion(Y: np.ndarray, mu: np.ndarray) -> np.ndarray:
     return np.clip(theta, 1e-2, np.inf)
 
 
-def _scrp_block(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def _glm_mean(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, Z: np.ndarray,
+              n_iter: int = 8, ridge: float = 1e-3) -> np.ndarray:
+    """Per-gene Poisson log-linear fit ``mu = s * exp(a_stratum + Z b)`` by IRLS, vectorised over genes."""
+    levels, codes = np.unique(strata, return_inverse=True)
+    X = np.hstack([np.eye(levels.size)[codes], Z])
+    n, p = X.shape
+    logs = np.log(s)[:, None]
+    B = np.zeros((p, Y.shape[1]))
+    for h in range(levels.size):
+        rows = codes == h
+        B[h] = np.log(np.maximum(Y[rows].sum(axis=0), 0.5) / max(s[rows].sum(), 1e-12))
+    pen = ridge * n * np.eye(p)
+    for _ in range(n_iter):
+        eta = np.clip(X @ B + logs, -30, 30)
+        mu = np.exp(eta)
+        z = eta - logs + (Y - mu) / np.maximum(mu, 1e-12)
+        A = np.einsum("np,ng,nq->gpq", X, mu, X, optimize=True) + pen
+        b = np.einsum("np,ng->gp", X, mu * z, optimize=True)
+        B = np.linalg.solve(A, b[..., None])[..., 0].T
+    return np.exp(np.clip(X @ B + logs, -30, 30))
+
+
+def _scrp_block(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, rng: np.random.Generator,
+                Z: np.ndarray | None = None) -> np.ndarray:
     n, g = Y.shape
-    mu = np.empty_like(Y)
-    for h in np.unique(strata):
-        rows = strata == h
-        p = Y[rows].sum(axis=0) / max(s[rows].sum(), 1e-12)
-        mu[rows] = s[rows, None] * p[None, :]
+    if Z is not None and Z.shape[1]:
+        mu = _glm_mean(Y, s, strata, Z)
+    else:
+        mu = np.empty_like(Y)
+        for h in np.unique(strata):
+            rows = strata == h
+            p = Y[rows].sum(axis=0) / max(s[rows].sum(), 1e-12)
+            mu[rows] = s[rows, None] * p[None, :]
     theta = _nb_dispersion(Y, mu)
     pois = ~np.isfinite(theta) | (theta > 1e6)
     th = np.where(pois, 1.0, theta)[None, :]
@@ -109,7 +153,12 @@ def make_decoy(
     seed: int = 0,
     gene_chunk: int = 2000,
 ):
-    """Return a copy of ``adata`` whose malignant-cell counts are replaced by a decoy."""
+    """Return a copy of ``adata`` whose malignant-cell counts are replaced by a decoy.
+
+    ``strata`` lists obs columns to condition on. With ``method="residual"``, numeric columns with
+    more than 10 distinct values enter the mean model as continuous covariates; the others define
+    permutation strata.
+    """
     if method not in ("residual", "permute"):
         raise ValueError("method must be 'residual' or 'permute'")
     rng = np.random.default_rng(seed)
@@ -124,7 +173,15 @@ def make_decoy(
             continue
         Xs = X[idx]
         totals = np.asarray(Xs.sum(axis=1)).ravel()
-        st = _strata(adata.obs.iloc[idx], totals, strata, n_depth_bins, n_cont_bins, min_stratum_cells)
+        obs_s = adata.obs.iloc[idx]
+        if method == "residual":
+            cont = tuple(c for c in strata if _is_continuous(obs_s[c]))
+            cat = tuple(c for c in strata if c not in cont)
+            st = _strata(obs_s, totals, cat, n_depth_bins, n_cont_bins, min_stratum_cells)
+            Z = _covariates(obs_s, cont)
+        else:
+            st = _strata(obs_s, totals, strata, n_depth_bins, n_cont_bins, min_stratum_cells)
+            Z = None
         sf = totals / max(np.median(totals), 1e-12)
         sf[sf == 0] = 1e-6
         expressed = np.flatnonzero(np.asarray(Xs.sum(axis=0)).ravel() > 0)
@@ -132,7 +189,7 @@ def make_decoy(
         for start in range(0, expressed.size, gene_chunk):
             cols = expressed[start:start + gene_chunk]
             Y = Xs[:, cols].toarray()
-            block = _permute_within(Y, st, rng) if method == "permute" else _scrp_block(Y, sf, st, rng)
+            block = _permute_within(Y, st, rng) if method == "permute" else _scrp_block(Y, sf, st, rng, Z)
             coo = sp.coo_matrix(block)
             add_r.append(idx[coo.row]); add_c.append(cols[coo.col]); add_v.append(coo.data)
     X_new = (sp.diags(keep_rows) @ X).tocsr()

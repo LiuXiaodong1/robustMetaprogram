@@ -40,13 +40,15 @@ decoy:
   enabled: true
   n: 3
   method: residual
-  strata: [clone, doublet_score]   # add an ambient-contamination estimate (e.g. DecontX) if available
+  strata: [clone, doublet_score]   # categorical -> permutation strata; continuous -> mean model.
+                                   # Add an ambient-contamination estimate (e.g. DecontX) if available.
   n_depth_bins: 1
 
 tme:
   enabled: true
   min_cells: 20
   n_boot: 200
+  n_null: 200              # random expression-matched gene sets for the null
   covariates: [cancer_type]
 
 positional:

@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     "instability": {"enabled": True, "seeds": [1, 2, 3], "n_boot": 3, "boot_fraction": 0.8,
                     "leave_one_study_out": True},
     "decoy": {"enabled": True, "n": 3, "method": "residual", "strata": [], "n_depth_bins": 1},
-    "tme": {"enabled": True, "min_cells": 20, "n_boot": 200, "covariates": None},
+    "tme": {"enabled": True, "min_cells": 20, "n_boot": 200, "n_null": 200, "covariates": None},
     "positional": {"enabled": True, "cytoband": None, "gtf": None,
                    "chrom_col": "chromosome", "start_col": "start"},
     "typer": {"enabled": True, "labels": None},   # CSV with columns mp,label (1 = artefact)
@@ -115,7 +115,8 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
         tc = cfg["tme"]
         cov = tuple(tc["covariates"]) if tc.get("covariates") is not None else None
         per_set, per_sample = tme_covariation(adata, keys, mp_sets, counts_layer=layer, min_cells=int(tc["min_cells"]),
-                                              covariates=cov, n_boot=int(tc["n_boot"]), seed=int(cfg["seed"]))
+                                              covariates=cov, n_boot=int(tc["n_boot"]), n_null=int(tc["n_null"]),
+                                              seed=int(cfg["seed"]))
         tables["tme_covariation"] = per_set
         tables["tme_per_sample"] = per_sample
         log("[p1] TME co-variation done")

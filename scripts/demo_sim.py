@@ -45,7 +45,7 @@ def main():
         rows.append({"mp": mp, "planted": names[j] if J[i, j] >= 0.2 else "(none)",
                      "truth_kind": truth["kinds"][names[j]] if J[i, j] >= 0.2 else "",
                      "jaccard": round(float(J[i, j]), 2),
-                     **{c: flags.loc[mp, c] for c in ["recruitment", "partial_r2", "kappa_ratio_median",
+                     **{c: flags.loc[mp, c] for c in ["recruitment", "partial_r2", "null_q95", "slope", "kappa_ratio_median",
                                                       "mean_delta_intensity", "frac_loss_beyond_null_intensity",
                                                       "recovery_all", "best_arm", "q_excluding_known_clusters",
                                                       "flagged"] if c in flags}})

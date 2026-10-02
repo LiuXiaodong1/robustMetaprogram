@@ -8,8 +8,8 @@ can be explained by nuisance. The code is the `mpaudit` package in this reposito
 
 | Axis | Statistic | Flag used in the GO rule |
 |---|---|---|
-| **Decoys** (`mpaudit.decoy`) | Fraction of nuisance-only decoy cohorts in which the unmodified pipeline produces an MP with Jaccard ≥ 0.3 to the real MP | recruitment ≥ 0.3 |
-| **TME co-variation, A1** (`mpaudit.tme`) | Partial R² of per-sample malignant MP score on the same genes' score in co-resident TME cells, beyond cancer type (bootstrap 90% CI); within-sample co-expression ratio TME/malignant (`kappa_ratio_median`) | partial R² ≥ 0.3 |
+| **Decoys** (`mpaudit.decoy`) | Fraction of nuisance-only decoy cohorts in which the unmodified pipeline produces an MP with Jaccard ≥ 0.3 to the real MP. Decoys keep depth, categorical strata (e.g. CNA clone) and continuous covariates (doublet score, contamination) cell by cell, and destroy all other co-expression | recruitment ≥ 0.3 |
+| **TME co-variation, A1** (`mpaudit.tme`) | Partial R² of per-sample malignant MP score on the same genes' score in co-resident TME cells, beyond cancer type (bootstrap 90% CI), with a null from expression-matched random gene sets; within-sample co-expression ratio TME/malignant (`kappa_ratio_median`) | positive association, partial R² ≥ 0.3 and above the random-set 95th percentile |
 | **Protocol, A4** (`mpaudit.protocol`) | Paired change in MP intensity and prevalence between protocols of the same tumour, against same-protocol region pairs | loss beyond the null in ≥ 50% of paired tumours |
 | **Instability** (`mpaudit.instability`) | Recovery (Jaccard ≥ 0.3) of each reference MP under one-factor perturbations: seed, rank grid, thresholds, gene universe, centring, leave-one-study-out, 80% cell bootstraps | informational |
 | **Positional, A3** (`mpaudit.positional`) | Hypergeometric arm enrichment, BH within MP, also with known positional gene families removed | informational |
