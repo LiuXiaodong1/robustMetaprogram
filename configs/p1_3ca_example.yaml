@@ -1,0 +1,69 @@
+# Example P1 configuration for a 3CA-style cohort (adapt column names to your AnnData).
+# Run:  mpaudit p1 cohort.h5ad --config configs/p1_3ca_example.yaml --out results/p1 --n-jobs 8
+keys:
+  sample: sample            # NMF unit (one tumour sample)
+  malignant: cell_type      # column marking malignant cells...
+  malignant_label: Malignant  # ...and the value that means malignant (omit for a bool column)
+  tumour: patient           # groups samples of the same tumour (twins, regions)
+  study: study
+  cancer_type: cancer_type
+  cell_type: cell_type      # TME cell types; needed for the TME axis
+  protocol: protocol        # e.g. fresh / fixed / nuclei; needed for the protocol axis
+  clone: clone              # optional: CNA clone labels (Numbat/CopyKAT)
+  doublet: doublet_score    # optional: scDblFinder score
+counts_layer: counts        # raw integer UMI counts (null = adata.X)
+recurrence_key: patient     # a tumour must not "recur" with its own second sample
+mps: rederive               # or a GMT of published MPs, e.g. the Gavish 2023 / 3CA v2 lists
+n_jobs: 8
+cache_dir: nmf_cache        # NMF fits are reused across perturbations and re-runs
+
+gavish:                     # 3CA defaults; listed here to make the audited setting explicit
+  ranks: [4, 5, 6, 7, 8, 9]
+  nrun: 10
+  n_universe: 7000
+  intra_min: 35
+  intra_max: 10
+  inter_min: 10
+  min_group_size: 5
+  min_programs_per_mp: 5    # 3CA v2 post filters
+  min_studies_per_mp: 2
+
+instability:
+  enabled: true
+  seeds: [1, 2, 3]
+  n_boot: 3
+  boot_fraction: 0.8
+  leave_one_study_out: true
+
+decoy:
+  enabled: true
+  n: 3
+  method: residual
+  strata: [clone, doublet_score]   # add an ambient-contamination estimate (e.g. DecontX) if available
+  n_depth_bins: 1
+
+tme:
+  enabled: true
+  min_cells: 20
+  n_boot: 200
+  covariates: [cancer_type]
+
+positional:
+  enabled: true
+  cytoband: ref/cytoBand.hg38.txt.gz   # UCSC cytoBand table
+  gtf: ref/gencode.v44.basic.annotation.gtf.gz
+
+typer:
+  enabled: true
+  labels: null              # CSV (mp,label) e.g. 1 for the 11 MPs removed by hand in 3CA v2
+
+protocol:
+  enabled: true
+  reference: fresh
+  test: fixed
+
+decision:
+  recruitment: 0.3
+  partial_r2: 0.3
+  protocol_frac_beyond_null: 0.5
+  min_mps: 3

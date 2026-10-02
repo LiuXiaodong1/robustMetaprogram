@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+# audit outputs and caches
+results/
+nmf_cache/
+*.h5ad

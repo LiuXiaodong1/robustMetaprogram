@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mpaudit"
+version = "0.1.0"
+description = "Pilot audit (P1) of NMF-based tumour metaprograms: Gavish/3CA port, instability, decoys, TME co-variation, positional and protocol axes"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "anndata>=0.10",
+    "pyyaml>=6.0",
+    "threadpoolctl>=3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+mpaudit = "mpaudit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
