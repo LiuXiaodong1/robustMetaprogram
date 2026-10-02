@@ -1,0 +1,13 @@
+nb_exact   pca_top30     exact     typeI=0.053 meanZ=-0.02 sdZ=1.01 reps=300
+nb_exact   pca_top30     mom       typeI=0.037 meanZ=-0.06 sdZ=0.94 reps=300
+nb_exact   pca_top30     poisson   typeI=0.980 meanZ=+3.19 sdZ=0.88 reps=100
+nb_exact   seed_coexp30  exact     typeI=0.027 meanZ=-0.07 sdZ=0.96 reps=300
+nb_exact   seed_coexp30  mom       typeI=0.043 meanZ=-0.04 sdZ=1.01 reps=300
+nb_exact   seed_coexp30  poisson   typeI=0.830 meanZ=+2.41 sdZ=0.85 reps=100
+onoff      pca_top30     mom       typeI=0.067 meanZ=+0.14 sdZ=1.05 reps=300
+onoff      pca_top30     mom_half  typeI=0.023 meanZ=-0.30 sdZ=1.00 reps=300
+onoff      pca_top30     poisson   typeI=0.970 meanZ=+2.79 sdZ=0.56 reps=100
+onoff      seed_coexp30  mom       typeI=0.033 meanZ=+0.03 sdZ=0.96 reps=300
+onoff      seed_coexp30  mom_half  typeI=0.027 meanZ=-0.28 sdZ=1.05 reps=300
+onoff      seed_coexp30  poisson   typeI=0.990 meanZ=+2.81 sdZ=0.53 reps=100
+lognormal  pca_top30     mom       typeI=0.037 meanZ=+0.20 sdZ=0.96 reps=300

@@ -1,0 +1,4 @@
+H0 delta=0                   spec_pois  mean logE=  -8716.1  sd=  278.4  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0                   spec_nb    mean logE=  -2654.1  sd=   93.1  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0                   plug_pois  mean logE=   -133.3  sd=   77.4  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0                   plug_nb    mean logE=    -77.1  sd=   37.9  P(E>=20)=0.00  P(E>=160)=0.00

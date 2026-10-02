@@ -1,0 +1,16 @@
+H0_delta0                    spec_pois  mean logE=  -8859.3  sd=  512.0  P(E>=20)=0.00  P(E>=160)=0.00
+H0_delta0                    spec_nb    mean logE=  -2652.3  sd=   84.5  P(E>=20)=0.00  P(E>=160)=0.00
+H0_delta0                    plug_pois  mean logE=   -184.2  sd=   37.2  P(E>=20)=0.00  P(E>=160)=0.00
+H0_delta0                    plug_nb    mean logE=    -93.8  sd=   37.2  P(E>=20)=0.00  P(E>=160)=0.00
+H1_delta0.5x20g              spec_pois  mean logE=  -5618.0  sd=  536.6  P(E>=20)=0.00  P(E>=160)=0.00
+H1_delta0.5x20g              spec_nb    mean logE=  -1775.6  sd=   93.9  P(E>=20)=0.00  P(E>=160)=0.00
+H1_delta0.5x20g              plug_pois  mean logE=  +3690.2  sd=  405.8  P(E>=20)=1.00  P(E>=160)=1.00
+H1_delta0.5x20g              plug_nb    mean logE=   +910.1  sd=   80.1  P(E>=20)=1.00  P(E>=160)=1.00
+H1_delta1.0x20g              spec_pois  mean logE=  +7972.9  sd= 1163.5  P(E>=20)=1.00  P(E>=160)=1.00
+H1_delta1.0x20g              spec_nb    mean logE=  +1521.0  sd=  223.0  P(E>=20)=1.00  P(E>=160)=1.00
+H1_delta1.0x20g              plug_pois  mean logE= +20828.3  sd=  871.2  P(E>=20)=1.00  P(E>=160)=1.00
+H1_delta1.0x20g              plug_nb    mean logE=  +4353.6  sd=  182.7  P(E>=20)=1.00  P(E>=160)=1.00
+H0_kappaSD0.2                spec_pois  mean logE=  -5547.9  sd=  629.6  P(E>=20)=0.00  P(E>=160)=0.00
+H0_kappaSD0.2                spec_nb    mean logE=  -1542.8  sd=  218.2  P(E>=20)=0.00  P(E>=160)=0.00
+H0_kappaSD0.2                plug_pois  mean logE=  +3987.0  sd=  811.0  P(E>=20)=1.00  P(E>=160)=1.00
+H0_kappaSD0.2                plug_nb    mean logE=  +1416.7  sd=  287.6  P(E>=20)=1.00  P(E>=160)=1.00
