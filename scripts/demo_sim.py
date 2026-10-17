@@ -42,12 +42,14 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--clean", action="store_true", help="null cohort: no planted nuisance programs and no CNA")
     ap.add_argument("--no-instability", action="store_true")
+    ap.add_argument("--cache-dir", help="keep NMF fits on disk so an interrupted run resumes")
     args = ap.parse_args()
 
     flags = dict(dissociation_stress=False, tme_contamination=False, cna=False, technical_axes=False) if args.clean else {}
     adata, truth = simulate_cohort(seed=args.seed, **flags)
     cfg = {
         "keys": KEYS, "counts_layer": "counts", "recurrence_key": "tumour", "n_jobs": args.n_jobs,
+        "cache_dir": args.cache_dir,
         "gavish": {"nrun": args.nrun, "min_genes_per_cell": 0},  # toy cohort has only 1,500 genes
         "instability": {"enabled": not (args.no_instability or args.clean)},
         "decoy": {"n": 5, "arms": {"technical": ["doublet_est", "contamination_est", "pct_ribo", "intronic_fraction"],
