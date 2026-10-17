@@ -3,6 +3,20 @@
 **Draft project proposal (AI-assisted design synthesis; to be reviewed by the PI). Target: *Nature Methods* Article.**
 Date: 2026-10-02. Inputs: the landscape and gap analysis ([01_landscape_and_gap_analysis.md](01_landscape_and_gap_analysis.md)), four method concepts (CREDO, CALIPER, InvarMP, CERT-MP), and eight adversarial referee reports ([03_design_panel.md](03_design_panel.md)).
 
+**Revision note (2026-10-17).** Revised in response to the review of 2026-10-16 (code, citations and referee outputs of commit 7f4867e). What changed and why:
+1. **One P1 GO rule.** The text gave three different P1 gates, and the coded one could pass on almost any cohort. §0, §7 and §8 now state one frozen rule, **P1-GO v1.0**, as implemented in `src/mpaudit/report.py`. Dosage and instability no longer count toward GO. Decoys run through the Python port, not the original R code, and this is now said.
+2. **Null-relative thresholds.** The fixed partial R² bars of P1 and P6 sat below the random-gene-set null on the toy (null q95 0.35–0.66 in the reviewed demo, up to 0.78 in the current toy). They are replaced by "above the matched-null q99" (§2.5, §8).
+3. **A1 spillover.** Malignant→TME ambient RNA is now modelled and subtracted. The claim that TME cells carry no malignant programs is tempered (§1.3, §2.5).
+4. **A4.** The axis is κ-based with protocol-specific controls, and intensity and prevalence are tumour-relative and informational. Oliveira 2025 profiles FFPE blocks and has no fresh-dissociated malignant cells, so it is no longer listed as a fresh-versus-fixed twin (§2.5, §6.4).
+5. **Stress.** Baron 2020 was mis-cited. Dissociation-induced expression is attributed to van den Brink 2017, O'Flanagan 2019 and Neuschulz 2023, and the novelty is restated as per-tumour attribution (§7).
+6. **Specificity claims.** §1.3 and §6.3 now report what the saved simulations show, including the new `specificity_fix_check.py`. The 72%/100% figures are a specificity failure of the κ > 0 estimand, not a type I error.
+7. **New nuisance axes.** Gene length / nuclear (intronic) fraction and transcript abundance / %ribo are added, on user-reported evidence (§1.1, §2.1, §2.5, §6.2).
+8. **Pilots, timeline and pre-registration.** The pilot schedule now spans months 0–6 (P4 and P5 possibly to month 9), with summed durations. P1-GO v1.0 and the filled-in decision config are registered on OSF at month 0, together with an audit/confirmation split of studies (§8, §9, §11).
+9. **Positioning and references.** Updated for starCAT, TCCA, ISOMERIC, cEBMF, DECIPHER, SIMVI, arXiv 2410.06451, the Gene Program Dictionary and scPFA, each with its verification status (§4, §12).
+10. **Implementation status.** Covers `mpaudit` (P1), the NMF tolerance finding and the R-parity harness (§8).
+
+Numbers from the toy simulator (`mpaudit.sim`) are labelled as toy results. They are true by construction and are not evidence about real tumours.
+
 **Working name: TESSERA** (Typed, Effect-Sized, Specific, Split-validated, Externally Replicated, Audited metaprograms). A tessera is one tile of a mosaic.
 - Python package `tessera-mp` (`import tessera`); R bridge `tesseraR`.
 - The name has **not** been checked for collisions. Fallback names are `mpcert` and `CREDO`.
@@ -12,7 +26,12 @@ Date: 2026-10-02. Inputs: the landscape and gap analysis ([01_landscape_and_gap_
 ## 0. Bottom line
 
 - **Can it reach *Nature Methods*? Yes, but only if three conditions hold.**
-  1. Pilot P1 shows that at least 3 MPs that curators *retained* in 3CA are materially driven by nuisance, protocol or dosage, or are unstable. Rediscovering the 11 MPs already removed by hand does not count.
+  1. Pilot P1 returns **GO** under the frozen rule **P1-GO v1.0** (§8; implemented in `src/mpaudit/report.py`). GO needs at least 3 *retained* 3CA MPs (not curated artefacts, not typed dosage) with nuisance support from at least one of:
+     - a technical decoy arm (≥2 of ≥5 decoys, κ_retained ≥0.5);
+     - a positive, spillover-adjusted TME association above the q99 of matched random gene sets, for MPs not pre-declared as expected TME-shared;
+     - a κ loss beyond the null under a dissociation-free protocol in ≥50% of ≥4 paired tumours.
+
+     Rediscovering the 11 MPs already removed by hand does not count. Dosage or instability alone does not count either. If no criterion is adequately powered, the verdict is INCOMPLETE rather than GO or PIVOT.
   2. We secure a matched multi-protocol tumour cohort of **≥20 tumours**, either through a wet-lab partner or, less convincingly, by pooling public "twin" datasets.
   3. The certification layer measurably beats simple baselines: module preservation, count splitting plus BH, and a trivial covariate-based typer.
 
@@ -45,7 +64,7 @@ Date: 2026-10-02. Inputs: the landscape and gap analysis ([01_landscape_and_gap_
   - order-invariant equivalence typing;
   - a new matched multi-protocol cohort with pre-registered predictions.
 - **Biggest risk.** Most canonical MPs (cycle, IFN, hypoxia, pEMT) may simply be real. The audit would then mostly confirm them, and the paper reads as "a more complex method reproduces known programs with q-values".
-  - Mitigation: pilot P1 is a hard go/no-go gate.
+  - Mitigation: pilot P1 is a hard go/no-go gate. Its rule (P1-GO v1.0, §8) is frozen and registered before any 3CA expression data are opened, and it can fail.
   - The flagship is built around results that are *quantitative per tumour*, not around overturning MPs: the ex vivo share of each MP in each tumour, selection versus induction, and malignant-intrinsic versus TME-shared.
 - **Resources.** About 4 FTE for about 26 months to submission; 2,000–4,000 GPU-hours; a wet-lab cohort costing about USD 300–450k at full scope (an estimate to be quoted), with a minimal version at about USD 150–200k.
 
@@ -55,7 +74,7 @@ Date: 2026-10-02. Inputs: the landscape and gap analysis ([01_landscape_and_gap_
 
 ### 1.1 What is wrong with "recurrence"
 
-In the Gavish/3CA pipeline, "robust" means "recurrent". Its cross-tumour filter (≥10 of 50 shared genes from a 7,000-gene universe) guards against a random-gene null with P ≈ 1e-12 (landscape §1.4). Anything that recurs for a systematic reason passes: ambient RNA, doublets, dissociation stress, quality axes, positional programs. Every published variant then ends in manual curation (3CA v2 `inds_rm`, GeneNMF `dropMetaPrograms`).
+In the Gavish/3CA pipeline, "robust" means "recurrent". Its cross-tumour filter (≥10 of 50 shared genes from a 7,000-gene universe) guards against a random-gene null with P ≈ 1e-12 (landscape §1.4). Anything that recurs for a systematic reason passes: ambient RNA, doublets, dissociation stress, quality axes, gene-length / nuclear-fraction and transcript-abundance (%ribo) axes, positional programs. Every published variant then ends in manual curation (3CA v2 `inds_rm`, GeneNMF `dropMetaPrograms`).
 
 The referees showed that simply swapping in a *structureless* null does not fix this. Nuisance-only decoys reject for *any* co-expression, biological or artefactual. At atlas sample sizes every candidate reaches the permutation floor (CREDO referees, fatal flaw 1; CERT-MP referees, flaws 1 and 3).
 
@@ -106,8 +125,17 @@ A candidate program k is a non-negative loading vector w_k learned *only* on �
 ### 1.3 Why this is a new idea and not "another NMF"
 
 - **The estimand does not depend on the estimator.** The MP is (w_k, {κ_tk}, gene effects, provenance), and validity does not depend on how w_k was found. CALIPER's referees showed that its location estimand changed with the engine. Here the location is whatever the engine proposes; the *certificate* is engine-free, and engine invariance is reported as an empirical result, not claimed.
-- **Membership is defined by effect size and specificity, so it does not inflate with sample size.** A referee toy simulation ([referee_checks/ref1_check.py](referee_checks/ref1_check.py): 1,000 cells, NB size 3, unrelated program at fold change 2.5 in 30% of cells) showed that a point-null cross-fold test declares a tumour to "express" m in 72% of cases when m shares 5 of 40 genes with an unrelated program, and in 100% at 10 of 40. A second referee found the same direction with weaker effects (about 20–50% at 4–8 of 40; [referee_checks/ref2_sim2.out](referee_checks/ref2_sim2.out)). Conditioning on all other programs, plus an effect-size null calibrated within the tumour, removes that failure.
-- **Real negative controls replace synthetic nulls for provenance.** TME cells in the same droplet suspension share ambient RNA, dissociation time, ischaemia and RNA quality with the malignant cells, but not malignant programs. This control exists in essentially every 10x tumour sample. It turns "is this technical?" into a measured quantity rather than a curator's judgement.
+- **Membership is defined by effect size and specificity, so it does not inflate with sample size.** The toy checks are in [referee_checks/](referee_checks/README.md); their limits are listed at the end of this item.
+  - *The failure, ref1.* [ref1_check.py](referee_checks/ref1_check.py) uses 1,000 cells, NB size 3 and an unrelated program w at fold change 2.5 in 30% of cells. A point-null cross-fold test of κ(m) > 0 declared that a tumour "expresses" m in 72% of tumours when m shares 5 of its 40 genes with w, and in 100% at 10 of 40.
+  - *How to read it.* κ(m) > 0 is **true** in that setup, because the shared genes really co-vary through w. The 72% and 100% are therefore a specificity failure of the "κ > 0" estimand, not a type I error. The type I error is the k = 0 row, at 0.05.
+  - *A weaker program, ref2 sim2.* The same failure appears and grows with the number of cells. Pooled over 3 seeds, false membership was 10–17% at 4/40 shared genes and 28–89% at 8/40, from 300 to 3,000 cells ([ref2_sim2.out](referee_checks/ref2_sim2.out) and seeds 1 and 3). Standardising by random gene sets did not help (8/40, pooled: 0.28 → 0.29, 0.50 → 0.54 and 0.89 → 0.89).
+  - *The proposed fix, tested.* [specificity_fix_check.py](referee_checks/specificity_fix_check.py) tests the estimand of definition 1 (200 replicates per row). Conditioning on the overlapping program kept false membership at ≤ 1% up to 30 of 40 shared genes, with power 1.00. The within-tumour matched-random null band contributed nothing: its q95 stayed below the floor. Without conditioning, only the κ_min = 0.05 floor protects, and it fails once the overlap pushes κ above 0.05. With the true depth that happens from about 20 of 40 shared genes, where false membership is 98–100%.
+  - *Limits of that check.* It used a single tumour, a *perfect* dictionary (true loadings and baseline), a 300-gene universe and a membership fold of all 1,000 cells. Power was checked only at fold change 2.5. Specificity therefore rests on the overlapping program being in the dictionary, and P2 must show that with an estimated dictionary.
+- **Real negative controls replace synthetic nulls for provenance.** TME cells in the same droplet suspension share dissociation time, ischaemia and RNA quality with the malignant cells. They do not *express* malignant-specific programs, but they are not clean of them. As the 2026-10-16 review argued, most ambient RNA in tumour suspensions is likely to come from malignant cells (not quantified here). A malignant program whose strength varies between samples therefore leaks into the same samples' TME cells and can look TME-shared.
+  - A1 subtracts this predicted spillover before it uses TME cells as controls (§2.5).
+  - Some programs (IFN response, hypoxia, stress) are genuinely expressed in both compartments. TME co-variation alone therefore never types a program as technical.
+
+  With these caveats, the control exists in essentially every 10x tumour sample. It turns "is this technical?" into a measured quantity rather than a curator's judgement.
 - **Provenance is decided by equivalence tests, with an "indeterminate" outcome.** This reverses the burden of proof that the CALIPER and InvarMP referees found fatal.
 - **The conceptual inheritance is acknowledged, and so is the gap.** Cross-fitting and synthetic-control ideas exist (count splitting; ClusterDE; Clipper; sc-SHC; module preservation). What has not been done is to define and type a **cross-tumour recurrent program** with these tools at pan-cancer scale.
 
@@ -126,6 +154,7 @@ Required inputs:
 Optional inputs:
 - empty-droplet matrices (CellBender or SoupX ambient profile; otherwise a DecontX-style proxy, flagged as lower quality);
 - scDblFinder scores;
+- per-cell intronic (unspliced) fraction from STARsolo or velocyto, and gene lengths from a GTF (for the gene-length and nuclear-fraction axis, A5);
 - Numbat allele-aware CNA calls where BAMs exist;
 - pre-analytic covariates: ischaemia time, digestion time, DV200.
 
@@ -205,11 +234,43 @@ Each axis returns an estimate with a 90% CI. The pre-registered margins below tu
 
 | Axis | Estimand | "Excluded" (equivalence) | "Supported" |
 |---|---|---|---|
-| **A1 Compartment sharing** (the within-sample negative control) | Two quantities: (i) κ of k's genes in co-resident T/NK, myeloid, fibroblast and endothelial cells, after removing TME identity programs; (ii) partial R² of per-sample malignant prevalence on the same gene set's TME activity, conditioned on cancer type with study random effects | Upper CI of the TME/malignant κ ratio < 0.3 **and** partial R² upper CI < 0.1 | Lower CI of the ratio > 0.6 **or** partial R² lower CI > 0.3 |
+| **A1 Compartment sharing** (the within-sample negative control) | Two quantities: (i) κ of k's genes in co-resident T/NK, myeloid, fibroblast and endothelial cells, after removing TME identity programs; (ii) partial R² of the per-sample malignant score on the same gene set's **pseudo-bulk TME score after subtracting predicted malignant→TME ambient spillover** (see below), conditioned on cancer type with study random effects, against random gene sets matched on expression **and** malignant specificity | Upper CI of the TME/malignant κ ratio < 0.3 **and** upper CI of the adjusted partial R² below the matched-null q95 | Lower CI of the ratio > 0.6 **or** an adjusted partial R² above the matched-null q99 with a positive slope. There is no fixed R² bar (see below) |
 | **A2 Contamination/doublet** | Shapley share of κ_tk removed by the M_se and A_s terms, **together with** the cell-level association of k-activity with doublet score and ambient fraction | Share upper CI < 0.2 | Share lower CI > 0.5 **and** a positive doublet/ambient association. Loading similarity to TME cells alone is never enough, which protects mimicry programs such as pEMT, MES-like and MHC-II |
 | **A3 Genetic** | (a) dosage share: Shapley share of κ removed by **allele-anchored** D_cg; (b) clone η² of activity with a region-aware block permutation; (c) arm enrichment, with known positionally clustered biological programs as negative controls (EDC 1q21, KRT 12q13/17q21, MHC-II 6p21, histones 6p22, metallothioneins 16q13) | Dosage share upper CI < 0.2 (only where allele data exist) | Dosage share lower CI > 0.5 → "dosage-driven"; η² lower CI > 0.3 → "clone-linked". With expression-only CNA, only a "positional flag" is possible |
-| **A4 Protocol** | Paired, same-tumour Δlog κ, Δπ (selection) and Δm (induction) between protocols. The null variance comes from same-protocol, multi-piece replicates (regional heterogeneity). κ is a correlation, so it is invariant to gene-wise capture efficiency; this sidesteps InvarMP's κ-versus-δ identifiability problem, and panel retention ι_k ≥ 0.5 is required | \|mean Δlog κ\| ≤ log 1.5 **and** \|Δπ\| ≤ 0.1, by two one-sided tests (TOST) | Lower CI of loss > log 2 in fixed or in situ data → ex vivo; a significant Δπ with stable Δm → selection |
-| **A5 QC entanglement** | Correlation of activity with %mito, complexity and %ribo; Shapley share under QC terms | Reported only | Flag only; never used for deletion |
+| **A4 Protocol** | Paired, same-tumour **Δlog κ** between protocols, on the gene panel both protocols retain (panel retention ι_k ≥ 0.5). κ is a correlation, so gene-wise capture efficiency does not move it; this sidesteps InvarMP's κ-versus-δ identifiability problem. Null: same-protocol, multi-piece replicates (regional heterogeneity) where ≥3 pairs exist; otherwise random expression-matched gene sets in the same paired tumours. Δπ (prevalence) and Δm (intensity) use protocol-specific control genes from each protocol's malignant cells in the paired tumours; they are tumour-relative and informational (see below) | \|mean Δlog κ\| ≤ log 1.5 by two one-sided tests (TOST) | κ loss beyond the null with lower CI of loss > log 2 in fixed or in situ data → ex vivo; a tumour-relative Δπ with stable Δm → candidate selection (informational) |
+| **A5 QC entanglement** | Correlation of activity with %mito, complexity, %ribo and per-cell intronic (nuclear) fraction; the program's median gene length and fraction of genes > 100 kb; Shapley share under QC terms | Reported only | Flag only; never used for deletion |
+
+**Malignant→TME spillover (A1).** As the review pointed out, a random-gene null cannot absorb spillover, because random genes are not malignant-specific. The within-sample κ ratio can be inflated in the same way. A1 therefore works in four steps:
+1. It scores TME cells as **pseudo-bulk** (log of each TME group's mean CPM), the scale on which ambient RNA mixes linearly.
+2. It estimates each sample's ambient fraction **ρ̂** per TME cell type from malignant-specific markers. These are genes ≥ 8-fold higher in malignant cells than in every TME type, excluding the audited genes.
+3. It **subtracts** the predicted spillover log2((1 − ρ̂) n_g + ρ̂ m_g + 1), where n_g is the cell type's native profile and m_g the sample's malignant profile.
+4. It compares the adjusted partial R² with the **expression- plus specificity-matched** random-set null.
+
+Why subtraction rather than a covariate: on the toy, entering the spill score as a covariate removed the genuine IFN signal in 3 of 3 seeds.
+
+Why there is no fixed R² bar: the null itself is high and depends on the design. On the toy, null q95 ranged from about 0.1 to 0.8 across cohort designs (details under P6, §8).
+
+Open problems:
+- Subtraction under-corrects if real ambient RNA under-represents the markers (ρ̂ biased low).
+- The κ ratio (i) is not yet spillover-adjusted.
+
+**Capture and nulls (A4).** The choice of control genes matters:
+- With control genes matched on expression pooled across protocols, protocol-specific capture (Flex probe coverage, long genes in nuclei) can masquerade as loss. On the toy, a low-capture subset of cycle genes showed an intensity "loss" in 3 of 4 paired tumours with pooled controls, 1 of 4 with protocol-specific controls and 0 of 4 by κ.
+- Protocol-specific controls match every gene on its own level within a protocol. Any shift common to all paired tumours is therefore absorbed, whether it comes from capture or from biology.
+- So intensity and prevalence cannot see a cohort-wide loss; on the toy, stress intensity changed by about 0 while its κ collapsed. κ is the only A4 statistic for a cohort-wide loss.
+
+The nulls have their own limits:
+- The replicate null needs same-protocol region pairs, which public twins mostly lack.
+- The random-set fallback is wide for κ: only large losses pass, and it can collapse where random κ ≈ 0.
+- For intensity, it does not cover piece-to-piece variation.
+
+The selection-versus-induction prediction (§7, result 3) needs a contrast that can see cohort-wide prevalence shifts. That is open.
+
+**Gene-length and abundance axes (A5).** Gene length / nuclear (intronic) fraction and transcript abundance / %ribo are added as nuisance axes because of real-data evidence from the user's breast cancer snRNA-seq (HER2) project. This evidence is user-reported and not reproduced here. Two pre-registered de novo MP searches there produced mostly technical axes:
+- several "luminal" programs of long genes (median gene length 317–437 kb);
+- an abundance axis of short cytoplasmic genes that tracked %ribo in 29 of 30 patients (rho 0.68–0.77) and that reference matching labelled "EMT".
+
+These axes are flags, not offsets (§2.2). In P1, %ribo and intronic fraction also enter the technical decoy arm as continuous covariates, and the trivial typer gets the matching features (§6.2).
 
 Shapley attribution runs over the 2^4 nuisance subsets {ambient, TME components, allele dosage, QC}, with bootstrap over tumours. The attribution is therefore **independent of the order** in which nuisance terms are added.
 
@@ -226,10 +287,19 @@ Each axis decision controls its own error at α (a TOST or one-sided test). The 
 
 ### 2.6 Diagnostics (reported, not used for selection)
 
-- **Decoy audit.** We generate non-parametric decoys by stratified conditional residual permutation: gene-wise permutation of NB randomised-quantile residuals within clone × depth × doublet strata, which keeps each gene's real marginal misfit. These decoys are run label-blind through *unmodified* pipelines (Gavish code, GeneNMF, and the TESSERA engine without certification).
-  - The output is a per-MP **decoy recruitment rate**, a measure of how much nuisance can manufacture.
+- **Decoy audit.** We generate non-parametric decoys by stratified conditional residual permutation: gene-wise permutation of NB randomised-quantile residuals, which keeps each gene's real marginal misfit. Depth and continuous covariates enter the decoy's mean model, and categorical covariates define permutation strata.
+  - Decoys are built **per arm**, so that a recruitment can be typed:
+    - a *technical* arm keeps depth, doublet score, ambient/contamination estimate, %ribo and intronic fraction;
+    - a *dosage* arm keeps CNA clone.
+
+    Recruitment by the clone arm types an MP as "dosage", not "nuisance".
+  - The decoys are run label-blind through pipelines that do not model nuisance: Gavish code, GeneNMF, and the TESSERA engine without certification.
+    - In P1 they run through the Python port of the Gavish pipeline (`mpaudit.gavish`), not the original R code.
+    - R-versus-port parity is untested (§8). Until it passes on real samples, recruitment rates describe the port.
+  - The output is a per-MP **decoy recruitment rate** (hits among ≥5 decoys per arm), together with **κ_retained**, the share of the MP's within-sample co-expression that the decoys keep. Together they measure how much nuisance can manufacture.
   - It is valid as an audit because the audited pipelines do not condition on the nuisance model.
   - It carries no FDR claim.
+  - Caveat: the covariates (doublet score, contamination, inferred clones) are themselves estimated from expression. A real program correlated with one of them survives the decoy and can be "recruited". Toy example: the planted doublet score, coupled to cycling, kept 0.37 of cycle's κ, while an estimated doublet score kept about 0.01. Recruitment is therefore reported per arm, and the P1 rule requires κ_retained ≥ 0.5 as well as hits.
 - **Validity–stability plane:** certification strength on one axis, stability index on the other. A "stable artefact" shows up as its own quadrant.
 - **Identifiability:** anchor genes and the fraction of near-pure cells per MP. The pooling monotonicity of the sufficiently-scattered condition is stated as a *remark*, not a theorem, together with empirical breakdown maps over overlap and private-cone geometry.
 
@@ -252,7 +322,7 @@ Reason: where tumour = library, tumour-wide biology and library batch **cannot b
 - the gene minimum effect (log 1.2);
 - the match tolerance (cosine 0.7).
 
-All are interpretable, frozen and pre-registered on OSF **before** the atlas run.
+All are interpretable, frozen and pre-registered on OSF **before** the atlas run. The atlas run tests them on the held-out confirmation half of the studies, which the P1 audit never touches (§8).
 
 **Engine settings** (K_max, J, R, λ_x, n0, fold fractions) are chosen by held-out deviance or fixed defaults.
 
@@ -281,18 +351,22 @@ We publish a **full sensitivity table**: MP count, matched identities and type l
 
 | Competitor | Referee question | Answer |
 |---|---|---|
-| **GBCD** (Nat Genet 2025) | "GBCD already separates shared from patient-specific programs." | Agreed: we do not claim that split. GBCD has no existence or recurrence test, no tumour membership, no nuisance typing and no projector, and runs per cancer type. It is a TESSERA engine. We certify its output and benchmark GBCD *with* environment covariates (covariate-moderated EBMF; Stephens lab arXiv 2505.11639, referee-reported). |
+| **GBCD** (Nat Genet 2025) | "GBCD already separates shared from patient-specific programs." | Agreed: we do not claim that split. GBCD has no existence or recurrence test, no tumour membership, no nuisance typing and no projector, and runs per cancer type. It is a TESSERA engine. We certify its output and benchmark GBCD *with* environment covariates. Covariate-moderated EBMF (cEBMF; Denault…Stephens, arXiv 2505.11639, NeurIPS 2025) lets side information moderate the factor priors of an EBMF/NMF fit, so known nuisance covariates could enter a GBCD-like model directly. It does not test cross-tumour recurrence or type programs by provenance; we treat it as a candidate engine. |
 | **ITHmapper** (bioRxiv 2026) | "There is already a pan-cancer ITH package with a mapper." | Its states are discrete; sample-as-batch can erase tumour-wide signal; it has no uncertainty or provenance. We wrap scVI+Hotspot as an engine, certify its modules, and compare head-to-head on the matched cohort. |
-| **TCAT/starCAT** (Nat Methods 2025) | "A reference plus projector is TCAT." | The reference is a by-product. TCAT's reproducibility is cross-dataset recurrence, which systematic artefacts pass; its authors warn about Flex. Our projector adds SEs, novelty detection, panel retention and protocol typing. |
+| **TCAT/starCAT** (Nat Methods 2025) | "A reference plus projector is TCAT." | Agreed, the reference-plus-projection idea is not new. TCAT built a reproducible catalogue of 46 T-cell programs. The abstract reportedly presents starCAT as generalising the framework to other cell types and tissues; this is near-verbatim wording from search results, to be checked on the article before quoting. Our contribution is calibrated recurrence and provenance typing. TCAT's reproducibility is cross-dataset recurrence, which systematic artefacts pass, and its README cautions that the references are not established for 10x Flex. Our projector adds SEs, novelty detection, panel retention and protocol typing. |
+| **TCCA** (González-Bermejo et al., bioRxiv 2026) | "A newer pan-cancer MP atlas exists." | TCCA has 36 public studies, about 540 patients plus 183 cell-line samples, and SCEVAN malignant calls. It derives 43 MPs by Gavish-style clustering of per-sample NMF (RcppML, single seed) followed by a hand-curated whitelist. The criteria (mito/ribo-rich, single-study, < 10 programs) are stated only in a code comment. It is a second example of manual MP curation and a standard-pipeline baseline. We use its patient tumours, minus cell lines and minus studies shared with 3CA, for replication; the overlap is counted at P0. |
 | **Grabski multi-study NMF / Tetris / APAFA / SUFA** | "Subset sharing is solved." | For mutational signatures and bulk data, with MCMC. If ported to single-cell data, these models become engines; our claims do not depend on a correct posterior. A Tetris run on a 30-tumour subsample is held in reserve. |
 | **scDEF, consensus scHPF** | "There are already count-native hierarchical models." | They are engines without existence, membership or provenance inference. Benchmarked. |
 | **cNMF / GeneNMF / Gavish code** | "Why not just fix the thresholds?" | They are wrapped as engines; the decoy audit and TESSERA certification are applied to their outputs. |
 | **Spectra / DRVI** | "Prior-guided or disentangled factors?" | Neither has a recurrence or provenance inference layer. DRVI is benchmarked as the representative deep model. |
 | **CanSig benchmark** | "A benchmark already exists." | It has no planted confounders, null cohorts, calibration or typing metrics. We reuse its 12 datasets. |
 | **Clipper / ClusterDE / sc-SHC / recall** (referee-reported) | "Target-versus-null contrast and model-based nulls are known." | Correct, and we cite them. We do *not* use synthetic nulls for inference. Decoys are an audit diagnostic only. The inferential contribution is cross-fitted, effect-sized and specific tumour membership, plus real-negative-control provenance. |
+| **FDR via data splitting after clustering** (Wang, Lin & Zhao, arXiv 2410.06451) | "Error control after clustering exists." | It splits the data, tests after clustering on each half and combines the results by a mirror statistic, with asymptotic FDR control in Gaussian settings. This is the closest statistical relative of our cross-fitting. Its multiple-split mirror statistic is a candidate for combining our split replicates, but it does not address cross-tumour recurrence or provenance. |
+| **Gene Program Dictionary** (Xu…Ma, bioRxiv 2025.10.29.685322) | "A program catalogue with FDR exists." | It reports 1,534 consensus programs from 466 scRNA-seq datasets with permutation-based FDR (details from search snippets). It does not type tumour MPs by provenance against negative controls. It serves as adjacent work and as a reference to project onto. |
 | **Count splitting** (Neufeld et al.) / **thinning for Poisson factor models** (Wang et al., JASA, referee-reported) | "Valid inference after any latent-variable estimator already exists." | We use cell splitting for inference, which needs no dispersion assumptions, and thinning only for model selection. No new thinning theory is claimed. |
 | **Module preservation (NetRep) / CS-CORE** (referee-reported) | "Audit mode is module preservation; κ is CS-CORE." | Both are baselines. We adopt the CS-CORE-style estimator and add specificity conditioning, within-tumour null bands, cross-tumour recurrence and provenance. Audit mode must beat NetRep Zsummary at flagging labelled artefacts. |
-| **ISOMERIC, TreeAlign, CLCC** (referee-reported) | "CN-dependent vs CN-independent expression is done." | Their goal is a single-tumour decomposition. Ours is a typing axis for recurrent programs that is used only with allele anchoring. ISOMERIC is benchmarked where its code runs. |
+| **ISOMERIC** (bioRxiv 2025), **TreeAlign, CLCC** (referee-reported), **scPFA** (bioRxiv 2026) | "CN-dependent vs CN-independent expression is done." | ISOMERIC uses an adversarial autoencoder to separate copy-number-dependent from copy-number-independent variation in 189,027 tumour cells from 10 cohorts. It notes that CN dependency confounds the search for shared states. Its goal, like TreeAlign's and CLCC's, is a decomposition within tumours. Ours is a calibrated typing axis for recurrent cross-tumour programs, used only with allele anchoring. ISOMERIC is benchmarked where its code runs. scPFA (lineage-informed factor analysis of heritable programs) overlaps the clone/dosage axis; its abstract was not retrieved, so it must be read before we position against it. |
+| **SIMVI, DECIPHER** (Nat Commun 2025) | "Intrinsic versus context-induced states are already disentangled." | Both work within spatial datasets: SIMVI separates intrinsic from spatially induced latent variables, and DECIPHER learns separate molecular and spatial-context embeddings at atlas scale. A1 asks the related question for recurrent programs in dissociated scRNA-seq, using co-resident TME cells. We will use both methods on the Xenium/CosMx rung (§6.4). |
 | **inVAE / sysVI** (referee-reported) | "Invariant representation learning exists." | Those learn representations. We produce non-negative gene programs with paired, equivalence-tested protocol invariance on real twins. |
 | **Nomura/Tirosh multilayer GBM** (Nat Genet 2025, referee-verified) | "Baseline vs within-tumour programs is known." | Credited. Our between-tumour module is optional, with claims restricted to multi-library tumours. |
 
@@ -402,7 +476,7 @@ Baselines:
 Simple baselines, which every component must beat:
 - (a) published MPs plus NetRep module preservation on independent cohorts;
 - (b) per-tumour NMF plus count splitting plus BH;
-- (c) a trivial typer (MP-score correlation with %mito/%ribo, doublet score, TME-marker cosine, arm enrichment).
+- (c) a trivial typer: MP-score correlation with %mito, %ribo, intronic fraction and doublet score; median gene length and fraction of genes > 100 kb; TME-marker cosine; arm enrichment.
 
 Fairness:
 - every method runs with author defaults **and** a documented grid under an equal compute budget;
@@ -417,7 +491,7 @@ Fairness:
 | Recovery | Hungarian-matched cosine; F1 at cosine ≥0.8; gene AUPRC | Subset-shared F1 ≥0.85 at ≥5% of UMIs |
 | Null behaviour | MPs certified per null cohort (Sim-I) | Median 0; P(≥1) ≤ 0.1 |
 | False-MP rate | Certified MPs aligned to injected nuisance (cosine >0.6) and typed B1/B2 | ≤5% |
-| Specificity | False membership of non-expressing tumours that carry an overlapping program | ≤5% (versus 72% at 5/40 and 100% at 10/40 shared genes in a referee's toy simulation of a point-null cross-fold statistic) |
+| Specificity | False membership of non-expressing tumours that carry an overlapping program, for the conditional κ estimand with an *estimated* dictionary | ≤5%. For reference, from a toy with a perfect dictionary (single tumour, 300 genes): ≤1% up to 30/40 shared genes with conditioning; without conditioning, 0% until the overlap κ crosses the 0.05 floor, then about 100% (`specificity_fix_check.py`). The ref1 figures (72% at 5/40, 100% at 10/40) reject a null that is false. They measure a different estimand and are not compared with this target |
 | Depth invariance | Slope of membership rate against log10(cells) for fixed planted effects | \|slope\| ≤ 0.05 per decade above 200 cells |
 | Calibration | Type I of tumour and gene tests under non-NB marginals; empirical gene FDR | Within [0.03, 0.07] at α = 0.05; FDR ≤ nominal + 0.02 |
 | Typing | Macro-F1 on Sim-R artefacts; "indeterminate" rate as power falls | Macro-F1 ≥0.8 among determinate calls; false B1 ≤5% |
@@ -437,7 +511,15 @@ Hypotheses to measure, not assume:
    - The primary endpoint is *not* the canonical pairs, which any gene set passes. It is that B1/B2 MPs respond specifically to at least one mechanism-matched drug more often than T-typed programs (Fisher test).
    - Plus five pre-registered **non-canonical** drug–MP pairs whose outcome is uncertain.
 3. **Cross-protocol, the decisive rung.**
-   - New matched cohort (§7) plus public twins: Janesick (1 block), Oliveira (Flex n = 8, Xenium n = 4), Trinks lung (n = 3), the ccRCC fresh/sn/snFlex preprint, the multi-platform COAD/HCC/OV and breast/NSCLC Xenium sets (referee-reported).
+   - New matched cohort (§7) plus public twins:
+     - Janesick (1 block);
+     - Trinks lung: patient-matched fresh, cryopreserved and FFPE; n = 3 per the referees, and the patient count and Flex use are not re-checked;
+     - the ccRCC fresh scRNA-seq / frozen snMultiome / FFPE snFlex preprint (Xirenayi et al., bioRxiv 2025). Whether its specimens are patient-matched is unverified; P0 confirms it before the preprint is used as a twin;
+     - the multi-platform COAD/HCC/OV and breast/NSCLC Xenium sets (referee-reported).
+
+     Two further candidates, both unchecked, were found in October 2026: a GEM-X Flex performance preprint (bioRxiv 10.64898/2026.03.06.710062) and a Frontiers 2026 brief report on matched FFPE and frozen samples.
+   - **Oliveira et al. (Nat Genet 2025) is not a fresh-versus-fixed twin.** Its Chromium Flex (8 FFPE blocks of tumour and normal tissue), Visium HD (5 patients) and Xenium (4 tumours) data all come from the same FFPE blocks, and we found no fresh-dissociated malignant cells in it. It is used only as a fixed-dissociated versus in situ panel comparison.
+   - Most public twins lack same-protocol replicate pieces, so their A4 null is the wider random-set null (§2.5).
    - Primary endpoint: AUROC of the "ex vivo/protocol-sensitive" calls for predicting loss in fixed or in situ data from the same tumour, against a multi-region null.
    - Secondary endpoint: concordance of B1-typed MP usage across protocols.
 4. **Spatial.**
@@ -447,7 +529,7 @@ Hypotheses to measure, not assume:
    - Allele-aware Numbat on ≥6–8 BAM-accessible datasets (≥60 tumours) plus clonealign scDNA sets.
    - Target: agreement of A3 calls between allele-based and expression-based clones, Cohen's κ ≥ 0.6. The power calculation is pre-specified.
 6. **Held-out cohort.**
-   - Discover on 3CA; replicate on TCCA after removing overlapping studies. Independent patient studies are counted at P0.
+   - Discover on 3CA; replicate on TCCA's patient tumours after removing its 183 cell-line samples and every study shared with 3CA. The overlap is not stated in TCCA's README or abstract, so it is counted from GEO accessions at P0, together with the number of independent patient studies that remain.
    - Target: ≥80% of B1 MPs re-certified, against ≤40% of T programs.
 7. **Clinical.**
    - TCGA associations of B1 MPs and of T-typed MSigDB GAVISH_3CA sets, each against 1,000 expression-matched random signatures (Venet 2011).
@@ -470,20 +552,28 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 
 **Data:**
 - every 3CA v1/v2 tumour with raw UMIs and TME cells, plus CELLxGENE tumour sets. P0 sets the final scope; the realistic target is 1,000–2,500 tumours, ≥8 cancer types and 2–5×10^6 malignant cells. This is lower than the concepts' 10^7, as the referees argued.
-- TCCA, held out for replication.
+- TCCA patient tumours (no cell lines, no studies shared with 3CA), held out for replication.
+- The 3CA studies are split at month 0 into an audit half (P1, the month-10 audit paper) and a confirmation half. Only the confirmation half is used for the pre-registered TESSERA analyses (§8).
 
 **Results:**
 
-1. **A provenance card for every Gavish-41 and 3CA v2 malignant MP**, certified on studies *not* used to derive each list. It reports r_L, lineage prevalence, type, Shapley shares, stability and core genes. Expectations:
+1. **A provenance card for every Gavish-41 and 3CA v2 malignant MP**, certified on studies *not* used to derive each list (for the lists derived from 3CA studies, this means TCCA, CELLxGENE sets, the new cohort and confirmation-half studies outside each list's derivation set). It reports r_L, lineage prevalence, type, Shapley shares, stability and core genes. Expectations:
    - cycle, IFN/MHC-II and hypoxia are B1 or B2;
    - LQ and contamination MPs are T;
-   - **at least 2 retained MPs change status.** This is the go/no-go result from P1.
-2. **Per-tumour decomposition of "stress"**, the most contested MP. This is quantitative and non-obvious. Prior work (O'Flanagan 2019; Baron 2020; Neuschulz 2023, all referee-reported) has already established *that* dissociation stress exists. Our results are new in three ways:
+   - **the P1 go/no-go result:** under P1-GO v1.0 (§8), at least 3 retained, non-dosage MPs have nuisance support. The atlas then types them with the full evidence vector on the confirmation half.
+2. **Per-tumour decomposition of "stress"**, the most contested MP. This is quantitative and non-obvious, but neither the existence of dissociation stress nor its protocol dependence is new:
+   - van den Brink et al. (2017) showed dissociation-induced expression in a subpopulation of muscle stem cells.
+   - O'Flanagan et al. (2019) compared cold-protease (6 °C) with collagenase (37 °C) dissociation in patient tumours, breast-cancer PDXs and cell lines (155,165 cells), and defined a 512-gene collagenase-associated stress core including FOS and JUN.
+   - Neuschulz et al. (2023) showed directly, by 4sU-labelling transcripts made during dissociation of mouse tissues, that dissociation adds a shared core stress signature plus cell-type-specific responses.
+   - Fixation before dissociation (FixNCut; Jiménez-Gracia et al. 2024) reduces stress-related artefacts.
+   - Baron et al. (2020), by contrast, argue from zebrafish melanoma, spatial transcriptomics and human samples that a stress-like cancer-cell state also exists *in vivo*. They acknowledge the dissociation concern but do not establish dissociation stress.
+
+   The stress MP is therefore plausibly a **mixture** of ex vivo induction and an in vivo state. To our knowledge, nobody has measured its per-tumour ex vivo share. Our novelty is that per-tumour attribution, not the existence of the response. Possible pre-emption: a 2026 preprint comparing dissociated with intact tumour was seen only as a search snippet and has not been identified (P8). Our results are new in three ways:
    - (a) the ex vivo share of the stress MP's usage **in each tumour**, compared with the TME-cell sensor;
    - (b) whether a protocol-invariant HSP/UPR component is B1 (malignant-intrinsic) or B2 (TME-shared);
    - (c) which *other* canonical MPs carry measurable ex vivo induction. Candidate: hypoxia induced by warm ischaemia.
-3. **Selection versus induction.** Prediction: pEMT/mesenchymal-like prevalence is *higher* in Flex and single-nucleus data than in fresh dissociation of the same tumour. That is selection against fragile cells, typed P-selection; a gene-list pipeline would read it as absent.
-4. **Malignant-intrinsic versus TME-shared programs.** For each MP, the fraction of its tumour-level variance that co-varies with the same gene set in co-resident TME cells. This separates niche-driven programs (IFN, hypoxia) from cell-intrinsic ones. Validated by spatial and CCLE recurrence.
+3. **Selection versus induction.** Prediction: pEMT/mesenchymal-like prevalence is *higher* in Flex and single-nucleus data than in fresh dissociation of the same tumour. That is selection against fragile cells, typed P-selection; a gene-list pipeline would read it as absent. Testing it needs a contrast that can see a cohort-wide prevalence shift. A4's prevalence, which is tumour-relative with protocol-specific controls, cannot (§2.5).
+4. **Malignant-intrinsic versus TME-shared programs.** For each MP, the fraction of its tumour-level variance that co-varies with the same gene set in co-resident TME cells, after subtracting predicted malignant→TME spillover (§2.5). This separates niche-driven programs (IFN, hypoxia) from cell-intrinsic ones. Validated by spatial and CCLE recurrence.
 5. **Genetic provenance where alleles exist.** A calibrated estimate of the fraction of recurrent ITH that is dosage-driven per cancer type (e.g. chr7/chr10 in GBM). This replaces the post hoc 24%, 8% and 39% figures (Gavish, Kinker).
 6. **Missed or merged programs.** Subset-shared programs from small tumours and split hybrids (EMT variants), each required to replicate in TCCA.
 
@@ -498,27 +588,90 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 
 ---
 
-## 8. Go/no-go pilots (months 0–3) and the publishable floor
+## 8. Go/no-go pilots (months 0–6) and the publishable floor
 
-| Pilot | Duration | Decision criterion |
-|---|---|---|
-| **P0 Data and design census** | 2 weeks | GO if ≥1,000 tumours with raw UMIs **and** TME cells across ≥8 types, and ≥15% of candidate MPs are used by tumours that bridge ≥2 protocol levels. Also count: empty droplets; BAM access (submit DAC applications in week 1); TCCA overlap; the cohort × lineage × protocol rank. If the bridge share is <15%, A4 depends on the new cohort, so a wet-lab partner becomes mandatory. |
-| **P1 Audit of the standard against real nuisance** (key gate) | 4 weeks | On retained 3CA MPs: leave-study-out instability of the Gavish code; SCRP decoy recruitment through the unmodified code (with a Sim-I backbone cross-check); A1 TME co-variation; protocol shift in public twins against the multi-region null. **GO** if ≥3 retained MPs show recruitment ≥30%, *or* A1 partial R² ≥0.3, *or* a protocol loss beyond the null. **PIVOT** if none: re-centre on calibrated membership, gene tiers and projection, and change venue (Genome Biology / NAR GAB). |
-| **P2 Specificity and depth invariance of κ** | 3 weeks | Overlap leakage ≤5% at 10–25% shared genes; membership slope ≤0.05 per decade; power ≥0.8 for G2/M and hypoxia in tumours with ≥200 cells. Otherwise revise the null band or margins. |
-| **P3 Cross-fitting calibration** | 2 weeks | Type I in [0.03, 0.07] under non-NB marginals on Sim-I nulls; gene FDR ≤0.07 at nominal 0.05. |
-| **P4 Typing beats trivial** | 1 week | Evidence-vector AUROC exceeds the trivial typer by ≥0.05 on the expanded labelled set. Otherwise typing is demoted from the headline. |
-| **P5 Positional/CNA audit** | 3 weeks (on BAM subset) | If <5% of MPs are dosage-affected, A3 becomes an annotation rather than a headline. |
-| **P6 TME sensor** | 2 weeks | Per-sample malignant stress usage against the TME IEG level: partial R² ≥0.3 for stress, ≤0.05 for cycle and hypoxia. This validates A1 specificity. |
-| **P7 Engine prototype and scaling** | 6 weeks (overlaps) | Matched cosine for subset-shared programs ≥ GBCD + 0.05; a 3CA-v1-scale fit in ≤24 GPU-hours. Otherwise the default engine is TESSERA-wrapped cNMF, with the headline unchanged. |
-| **P8 Scoop check** | 1 week, then every 2 weeks | Landscape §6.3 search terms plus: "cross-fitted gene program", "metaprogram provenance", "protocol-invariant program", "decoy metaprogram", and papers citing GBCD, TCAT, Gavish, Neuschulz and Marsh. NO-GO only if a preprint already types recurrent MPs against within-sample negative controls. |
+The pilots were first squeezed into months 0–3. Their durations sum to **18 person-weeks** (P0–P6 and P8; P7's 6 weeks overlap), and four of them need components that do not exist yet. The realistic schedule has three groups:
+- **Months 0–3** hold what can run now: P0, P1 (`mpaudit` as built), P6 and P8, which is 9 weeks, plus the R-versus-port parity check.
+- **Months 3–6** hold P2 and P3 (5 weeks). They need κ cross-fitting and the Sim-I generator, neither of which is built.
+- **P4 and P5** (4 weeks) wait for labels and allele data, and may slip to month 9.
 
-**Decision at month 3.**
-- P0, P1 and P3 pass → full plan.
-- P1 fails → pivot.
+| Pilot | Starts | Duration | Decision criterion |
+|---|---|---|---|
+| **P0 Data and design census** | Month 0. Metadata only until the OSF registration | 2 weeks | GO if ≥1,000 tumours with raw UMIs **and** TME cells across ≥8 types, and ≥15% of candidate MPs are used by tumours that bridge ≥2 protocol levels. Also count: empty droplets; BAM access (submit DAC applications in week 1); TCCA overlap, from GEO accessions; the cohort × lineage × protocol rank; and whether each half of the study split keeps P1's powered minimum (≥4 paired tumours, ≥10 samples with TME cells). The MP-usage count for the bridge share runs after registration, on the audit half. If the bridge share is <15%, A4 depends on the new cohort, so a wet-lab partner becomes mandatory. |
+| **P1 Audit of the standard against real nuisance** (key gate) | Month 0–1, after registration. Runs now with `mpaudit` | 4 weeks, plus NMF compute | Audit of 3CA MPs on the audit half: decoy arms, A1 TME co-variation and A4 protocol κ in public twins; instability and positional flags outside the dosage rule are informational. The decision follows **P1-GO v1.0** (below): GO, PIVOT or INCOMPLETE. **PIVOT**: re-centre on calibrated membership, gene tiers and projection, and change venue (Genome Biology / NAR GAB). **INCOMPLETE**: close the data gap that left every criterion unpowered and rerun under the same frozen rule. |
+| **P2 Specificity and depth invariance of κ** | Months 3–6. Needs κ cross-fitting (`tessera.certify`) and Sim-I v0, neither built | 3 weeks | Overlap leakage ≤5% at 10–25% shared genes with an *estimated* dictionary (the toy check used a perfect one, §1.3); membership slope ≤0.05 per decade; power ≥0.8 for G2/M and hypoxia in tumours with ≥200 cells. Otherwise revise the null band or margins. |
+| **P3 Cross-fitting calibration** | Months 3–6. Needs Sim-I nulls | 2 weeks | Type I in [0.03, 0.07] under non-NB marginals on Sim-I nulls; gene FDR ≤0.07 at nominal 0.05. |
+| **P4 Typing beats trivial** | About month 6. Needs ≥40 labelled artefacts and the evidence-vector typer | 1 week | Evidence-vector AUROC exceeds the trivial typer by ≥0.05 on the expanded labelled set. Otherwise typing is demoted from the headline. Only 11 labels exist now (the 3CA v2 `inds_rm` MPs), and `mpaudit` has only the trivial typer. |
+| **P5 Positional/CNA audit** | When BAM access arrives (DAC at month 0, then 3–6 months), so months 4–9 | 3 weeks (on BAM subset) | If <5% of MPs are dosage-affected, A3 becomes an annotation rather than a headline. Until then only `mpaudit`'s expression-only positional flag exists, and it cannot establish dosage. |
+| **P6 TME sensor** | Months 0–3. Runs now (`mpaudit.tme`) | 2 weeks | Per-sample malignant stress usage against the TME IEG level, spillover-adjusted, with a positive slope. Stress must be **above the random-set null q99**; cycle and hypoxia must **not** be above it. Fixed partial R² bars are not used. On the toy, the null alone reached q95 0.55–0.78 and q99 0.69–0.87 (default cohort, seed 0), and q95 about 0.1–0.45 in a fresh-only 1,500-gene toy. The old "≤0.05 for hypoxia" bar failed on the earlier toy demo (0.32). On the current toy (seed 0), stress passes (0.99 vs q99 0.81) and cycle (0.25 vs 0.69) and hypoxia (0.00 vs 0.70) stay below. Passing on real data validates A1 specificity; the toy run only checks the code. |
+| **P7 Engine prototype and scaling** | Month 3 onward | 6 weeks (overlaps) | Matched cosine for subset-shared programs ≥ GBCD + 0.05; a 3CA-v1-scale fit in ≤24 GPU-hours. Otherwise the default engine is TESSERA-wrapped cNMF, with the headline unchanged. |
+| **P8 Scoop check** | Month 0 | 1 week, then every 2 weeks | Landscape §6.3 search terms plus: "cross-fitted gene program", "metaprogram provenance", "protocol-invariant program", "decoy metaprogram", and papers citing GBCD, TCAT, Gavish, O'Flanagan, Neuschulz and Marsh. Identify the 2026 dissociated-versus-intact tumour preprint seen only as a snippet, and read scPFA. NO-GO only if a preprint already types recurrent MPs against within-sample negative controls. A search in October 2026 (about 14 web searches, without bioRxiv full-text or PubMed access) found none; this is weak evidence. |
+
+**P1-GO v1.0** (frozen 2026-10-16). It is implemented in `src/mpaudit/report.py`, which is the single source of truth; [05_pilot_P1.md](05_pilot_P1.md) states the same rule.
+- **Unit.** *Retained* MPs are audited MPs not labelled as curated artefacts (`typer.labels` = 1; e.g. the 11 MPs removed by hand in 3CA v2). Rediscovering curated artefacts is not news.
+- **Pre-declared exclusions.** These are written into the config's `decision` block and registered before any 3CA expression data are opened.
+  - *Expected TME-shared biology.* An MP is excluded here if it is named on `expected_tme_shared` or overlaps a pre-declared gene set (`expected_tme_shared_gmt`) by ≥10 genes. This disables criterion (b) only; such an MP can still count through (a) or (c).
+  - *Dosage.* An MP is typed dosage if its genes are arm-enriched (BH q < 0.05 after excluding known positional gene clusters), or if a dosage decoy arm (CNA clone) recruits it under the thresholds of (a). Dosage MPs are labelled and never counted: they are genetic, not technical nuisance.
+- **Nuisance support**, any of:
+  - (a) *technical decoys*: in a technical decoy arm, ≥2 of ≥5 decoys recruit the MP (Jaccard ≥0.3), and the decoys keep κ_retained ≥0.5 of its within-sample co-expression;
+  - (b) *TME co-variation (A1)*: a positive slope and a spillover-adjusted partial R² above the q99 of random gene sets matched on expression and malignant specificity, in ≥10 samples with TME cells, for an MP not on the expected-TME-shared list. There is no fixed R² threshold;
+  - (c) *protocol (A4)*: a one-sided κ loss beyond the null under the dissociation-free protocol, in ≥50% of ≥4 paired tumours.
+- **Verdict.**
+  - GO if ≥3 retained, non-dosage MPs have nuisance support.
+  - INCOMPLETE if no criterion is adequately powered. Powered means ≥5 decoys in a technical arm for (a), ≥10 samples with TME cells for (b) and ≥4 paired tumours for (c).
+  - Otherwise PIVOT.
+- **Informational only.** Instability is informational; method variants such as "uncentred" are reported separately. So are positional flags outside the dosage rule and the trivial typer.
+- **What the audit runs through.** Decoys run through the Python port (`mpaudit.gavish`), not the original R code. R-versus-port parity is untested: the harness is in `scripts/parity`, but its R side has not been executed, because R could not be installed in the build environment. The planned Sim-I backbone cross-check of the decoys does not exist yet, because Sim-I is not built.
+
+**Pre-registration and study split (month 0).** Before any 3CA expression data are opened, we register on OSF:
+- P1-GO v1.0;
+- the filled-in `decision` config:
+  - the expected-TME-shared list, planned as IFN/MHC-II response and hypoxia and fixed at registration;
+  - the technical decoy arm: doublet score, ambient/contamination estimate, %ribo and intronic fraction;
+  - the dosage arm: CNA clone;
+  - all thresholds;
+- the `mpaudit` commit and NMF settings;
+- a **split of the 3CA studies** into an audit half and a held-out confirmation half.
+
+The split is drawn at random by study, stratified by cancer type and protocol. It is by study rather than by tumour because tumours of one study share lab and protocol. P1 and the month-10 audit paper use only the audit half. The later TESSERA pre-registration (M14: frozen defaults, margins, type rules, orthogonal endpoints) is kept, but it is tested only on the confirmation half, on TCCA and on the new cohort. The audit therefore never reuses the data that the pre-registered analyses test. The cost is power: P1 sees about half the twins and samples, which is why P0 checks each half.
+
+**Decision at month 3** (P0, P1):
+- P0 and P1 GO → continue to the method build.
+- P1 PIVOT → pivot.
+- P1 INCOMPLETE → close the data gap and rerun under the same rule.
+
+**Decision at month 6** (P2, P3):
+- P2 and P3 pass → full plan.
 - P3 fails after one revision → publish the audit plus the benchmark and stop method development.
 
+P4 and P5 can demote typing or A3 from the headline, but they do not stop the project.
+
+**Implementation status (2026-10-17).** `mpaudit` (this repository; [05_pilot_P1.md](05_pilot_P1.md)) implements P1:
+- the Python port of the Gavish/3CA pipeline (`gavish.py`, `nmf.py`), checked line by line against tiroshlab/3ca and renozao/NMF;
+- per-arm decoys with κ_retained (`decoy.py`);
+- A1 with spillover subtraction (`tme.py`);
+- κ-based A4 with protocol-specific controls (`protocol.py`);
+- instability and positional arm enrichment;
+- a trivial typer with gene-length, %ribo and intronic features (`typer.py`);
+- the P1-GO v1.0 decision (`report.py`).
+
+Findings and state:
+- **NMF tolerance.** The port now defaults to tol = 1e-7, because at 1e-5 the top-50 lists were not converged. Toy result: we continued the same trajectory to tol 1e-8. Against that reference, a program kept a median of 44 of its top 50 genes at 1e-5, 48 at 1e-6 and 49 at 1e-7. Tol 1e-7 costs about 3× the NMF time of 1e-5. The iteration cap, raised to 5,000, never bound. R's own stopping rule, applied to the same iterates, would stop after a median of about 920 iterations, about 5× later than tol 1e-5.
+- **R parity.** `scripts/parity` holds three steps:
+  1. export the exact NMF input;
+  2. `run_r_snmf.R` calls `NMF::nmf(method = "snmf/r")`;
+  3. `compare.py` gives PASS / WITHIN NOISE / FAIL / INVALID at the program, robust-program and MP level.
+
+  The Python side is tested; the R side has never been run, and there are no parity numbers yet. Until parity passes on 3–5 real samples (months 0–1), absolute numbers from the port (MP count, MP genes, decoy recruitment) are not 3CA-equivalent.
+- **Toy behaviour of each axis** (`mpaudit.sim`; true by construction, not evidence about tumours):
+  - *A1.* After spillover subtraction, only stress and IFN are above the null q99 (values under P6; IFN 0.94 vs 0.82). The leak is largely removed: CNA_7q goes from 0.60 unadjusted to 0.07, and hypoxia from 0.23 to 0.00. IFN can only be excluded by the expected-TME-shared list.
+  - *A4.* Stress loses κ in 4 of 4 paired tumours (κ about 0.70 fresh vs 0.05 fixed). Cycle, hypoxia, IFN, EMT, CNA and contamination show no κ loss. There was one false loss in 36 tests.
+  - *Decoys.* The technical arm (estimated contamination and doublet score) keeps κ_retained 1.27–1.31 of the contamination set and ≤0.04 of cycle and CNA. The value above 1 arises because the covariate is built partly from the set's own genes (19 of the covariate's 35 marker genes are in the set). The dosage arm (estimated clone) keeps 0.84–0.88 of CNA and about 0 of the others.
+  - *Typer.* For the abundance set, \|r\| with %ribo is 0.90–0.91 (next highest ≤0.17). The long-gene set has a median gene length of 351–454 kb and \|r\| with intronic fraction of 0.62–0.65 (others ≤0.08).
+- **Not built.** Sim-I, κ cross-fitting and the certification layer, the evidence-vector typer, allele-aware dosage (only an expression-only positional flag exists) and the TESSERA engine.
+
 **Publishable even if the full method fails:**
-1. An audit paper: "How many pan-cancer metaprograms survive nuisance-matched decoys, within-sample negative controls and protocol contrasts?" Ready by month 10. Venue: *Nature Methods* Analysis, *Genome Biology* or *Cell Systems*.
+1. An audit paper on the audit half of the studies: "How many pan-cancer metaprograms survive nuisance-matched decoys, within-sample negative controls and protocol contrasts?" Ready by month 10. Venue: *Nature Methods* Analysis, *Genome Biology* or *Cell Systems*.
 2. The Sim-I/Sim-R benchmark as a resource.
 3. The matched multi-protocol tumour cohort as a data resource (*Scientific Data* or *Genome Biology*).
 
@@ -528,14 +681,18 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 
 | Months | Milestone |
 |---|---|
-| 0–3 | Pilots P0–P8; DAC applications; IRB approval and wet-lab protocol optimisation; exact reproduction of the Gavish code |
-| 3–9 | v0.1: split, certify, genes, audit mode, decoy audit; Sim-I/Sim-R v1; **audit manuscript ready internally at M10** |
+| 0 | **OSF pre-registration 1**: P1-GO v1.0, the filled-in decision config, the audit/confirmation study split; DAC applications; P0 metadata census |
+| 0–3 | P0, P1 (`mpaudit`, audit half), P6, P8; R-versus-port parity on 3–5 real samples (`scripts/parity`); IRB approval and wet-lab protocol optimisation |
+| 3–6 | κ cross-fitting and Sim-I v0, then P2 and P3; P7 starts; P4 once ≥40 labels and the evidence-vector typer exist; P5 when BAM access arrives (possibly to M9) |
+| 3–9 | v0.1: split, certify, genes, audit mode, decoy audit; Sim-I/Sim-R v1; **audit manuscript (audit half) ready internally at M10** |
 | 6–16 | Matched cohort: 24 tumours collected at about 2–3 per month, then sequencing |
 | 9–15 | TesseraNMF v1; full baseline harness; benchmark on the fractional design; sensitivity tables |
-| 14 | **OSF pre-registration**: frozen defaults, margins, type rules, all orthogonal endpoints |
+| 14 | **OSF pre-registration 2**: frozen defaults, margins, type rules, all orthogonal endpoints, tested on the held-out confirmation studies |
 | 15–20 | Atlas run; TCCA; allele subset; Tahoe; spatial |
 | 18–22 | Scoring of matched-cohort predictions (pre-registered) |
 | 22–26 | Reference v1.0, package v1.0, manuscript; **submission about M24–26**; revision to about M32 |
+
+The submission target is unchanged, because the prerequisites of P2–P5 (cross-fitting, Sim-I, labels, allele data) were already scheduled in months 3–9. What moves is the method gate, from month 3 to about month 6, which leaves less slack.
 
 **Team (about 4 FTE):**
 - PI (20%);
@@ -548,7 +705,7 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 
 **Compute:**
 - 2–4 H100s; 2,000–4,000 GPU-hours;
-- 50–100k CPU core-hours (the Gavish R pipeline on real plus decoy data; GBCD; Numbat);
+- 50–100k CPU core-hours (the Gavish pipeline on real and decoy data, through the Python port plus the R code for parity; GBCD; Numbat);
 - 20 TB storage.
 
 **Preprint strategy and scoop risk.**
@@ -580,15 +737,15 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 | 6 | Cohort × lineage × protocol aliasing (CREDO F4; InvarMP F2/F4) | P0 design census as a gate. A4 is tested only where a bridge exists. The "C cohort-restricted" type replaces demotion to artefact. The new matched cohort supplies bridges. |
 | 7 | Tumour-wide programs vs library batch; decoys keep tumour means (CREDO rigor F2) | The primary estimand is within-tumour programs. The between-tumour module is optional and its claims are restricted to multi-library tumours plus cross-cohort replication. The limitation is stated explicitly. |
 | 8 | Count splitting does not break CNA circularity (CREDO F3; CERT-MP) | Dosage offsets only on allele-anchored segments; expression-only calls give a positional flag only. Positionally clustered biological programs serve as negative controls. Gene- and lineage-specific γ. Validation on ≥60 allele or scDNA tumours. |
-| 9 | Point-null membership is non-specific and saturates with n (CALIPER F1; CERT-MP F2) | κ is a depth-independent latent correlation, specific given all other programs, tested against a within-tumour matched null band with a floor. P2 gates leakage ≤5% and depth invariance. |
+| 9 | Point-null membership is non-specific and saturates with n (CALIPER F1; CERT-MP F2) | κ is a depth-independent latent correlation, specific given all other programs, tested against a within-tumour matched null band with a floor. In a toy with a perfect dictionary, conditioning did the work (≤1% false membership up to 30/40 shared genes); the null band added nothing, and the floor alone fails from about 20/40. P2 gates leakage ≤5% with an estimated dictionary, and depth invariance. |
 | 10 | Typing by non-rejection; order-dependent ladder (CALIPER F2; InvarMP rigor F1) | TOST equivalence per axis; Shapley order-invariant attribution; "indeterminate" outcome; B1 only on positive evidence. |
 | 11 | False or non-novel thinning theorems; Theorem 2 vacuous (CALIPER F3) | No thinning theory is claimed. Thinning is used only for model selection. Neufeld et al. and Hivert et al. are cited. |
 | 12 | Engine-indexed estimand contradicts "MP as estimand"; δ degenerate; s_min contradiction (CALIPER F4) | Location = engine proposal; the certificate is engine-free; engine invariance is reported empirically. Fixed biological match tolerance, self-similarity calibrated on independent cell folds. Single-cohort programs form a separate type, not a subtype of "exists". |
 | 13 | Fold C used twice (CALIPER rigor F3) | Three disjoint cell folds: discovery, membership, genes. |
 | 14 | Transport κ absorbs the dissociation artefact through responsive TME calibrators; κ vs δ not identified for malignant-only genes (InvarMP F1/F3) | No gene-wise transport is used for invariance tests. κ (a correlation) is invariant to gene-wise capture efficiency. TME cells serve as *negative controls* (A1), not as calibrators, and their responsiveness is the signal being measured. |
-| 15 | e-values invalid or powerless; e-BH arithmetic (InvarMP F3) | No universal-inference e-values. Paired tumour-level tests on a small, pre-registered hypothesis family (≤10–30 MP × axis pairs) with a stated power. |
+| 15 | e-values invalid or powerless; e-BH arithmetic (InvarMP F3) | No universal-inference e-values. The saved referee runs show why: the e-value as specified stayed valid but did not detect a 1.65-fold shift, and the plug-in variant that has power fired under the null whenever gene-wise capture was misestimated ([referee_checks](referee_checks/README.md)). Paired tumour-level tests on a small, pre-registered hypothesis family (≤10–30 MP × axis pairs) with a stated power. |
 | 16 | Pan-cancer invariance claim untestable on public data (InvarMP F2/F4) | The headline is restricted to bridged axes plus the new cohort. Elsewhere the label is "U-no-bridge", reported honestly in the design-graph report. |
-| 17 | Thinning null twins understate the real null (regional ITH) (InvarMP rigor) | The protocol null comes from same-protocol multi-region pieces (8 tumours) plus public multi-region data. |
+| 17 | Thinning null twins understate the real null (regional ITH) (InvarMP rigor) | The protocol null comes from same-protocol multi-region pieces (8 tumours) plus public multi-region data. Where replicates are missing, the null is random matched gene sets in the same tumours, which is wide for κ and ignores piece-to-piece variation; this is reported as the weaker null. |
 | 18 | QC covariates are post-treatment and absorb biology (CERT-MP novelty) | QC is never an offset. It is a reported A5 axis with Shapley share. |
 | 19 | Doublet prior cannot represent misclassified whole TME cells; mimicry programs mis-typed (CREDO rigor; CERT-MP) | Unconstrained usage of TME components. A2 requires a cell-level doublet or ambient association, not loading similarity. Planted mimicry tests in Sim-R. |
 | 20 | Underpowered validation (11-positive AUROC; n ≈ 6 matched tumours) | ≥40 labelled artefacts with CIs and a trivial baseline; matched cohort n = 24 with a power calculation; non-canonical Tahoe endpoints. |
@@ -598,6 +755,10 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 | 24 | The flagship confirms known biology | P1 gate; flagship built on per-tumour quantitative provenance and non-obvious selection/induction predictions. |
 | 25 | Wet-lab cohort fails (accrual, cost) | Minimal cohort of 12 tumours; PDX substitute; public twins; a computational-only claim limited to bridged axes. |
 | 26 | Scoop | Engine-agnostic claim; tripwire preprint at M10; fortnightly monitoring. |
+| 27 | The P1 gate could pass on almost any cohort: expected biology and CNA MPs counted, one decoy enough, fixed R² below the null, three versions of the rule (review 2026-10-16) | One frozen rule, P1-GO v1.0 (§8), registered at M0: expected-TME-shared MPs cannot count via A1; dosage MPs are never counted; ≥2 hits among ≥5 decoys with κ_retained ≥0.5; A1 above the matched-null q99; INCOMPLETE when unpowered. |
+| 28 | Malignant→TME ambient spillover makes malignant programs look TME-shared (review 2026-10-16) | Predicted spillover (ρ̂ from malignant-specific markers) is subtracted from pseudo-bulk TME scores, with an expression- plus specificity-matched null. The κ ratio is not yet adjusted; this is stated as open. |
+| 29 | The audit and the pre-registered analyses reuse the same 3CA data (review 2026-10-16) | Studies are split at M0 into audit and confirmation halves. P1 and the audit paper use the audit half only, and pre-registration 2 is tested on the confirmation half, TCCA and the new cohort. |
+| 30 | Decoy results describe the Python port, not the R pipeline; parity untested | R-versus-port parity on 3–5 real samples (`scripts/parity`) before P1 numbers are quoted as 3CA-equivalent; NMF tolerance tightened to 1e-7. |
 
 ---
 
@@ -618,7 +779,11 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
    - Ideally a data-sharing contact for raw 3CA matrices.
    - Decide whether to approach the GBCD or Tirosh groups as collaborators, which lowers scoop risk but shares credit.
 6. **Scope of the between-tumour module.** Ship it as an optional, limited-claim module (recommended), or omit it.
-7. **Pre-registration on OSF at M14.** Recommended; it constrains the analysis but is the best defence against cherry-picking critiques.
+7. **Pre-registration on OSF, in two steps.**
+   - At M0, before any 3CA expression data are opened, register P1-GO v1.0, the filled-in decision config (the expected-TME-shared list and the decoy arms) and the audit/confirmation study split.
+   - At M14, register the TESSERA defaults, margins, type rules and endpoints, to be tested on the held-out confirmation studies.
+
+   Recommended: it constrains the analysis, but it is the best defence against cherry-picking critiques. The user must approve the expected-TME-shared list before M0.
 8. **Preprint policy.** Single preprint at submission with tripwires (recommended), or an early audit preprint.
 9. **Name** after the collision check.
 10. **Team hiring:** whether the RSE is a hire or shared core staff.
@@ -634,8 +799,8 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 - Barkley et al., Nat Genet 54:1192–1201 (2022) [V]
 - GeneNMF (CRAN) [V]
 - Liu…Stephens, GBCD, Nat Genet 57:263–273 (2025) [V+]
-- Kotliar…Raychaudhuri, TCAT/starCAT, Nat Methods 22:1964–1980 (2025) [V]
-- Nofech-Mozes…Abelson, ITHmapper, bioRxiv 2026 [V]
+- Kotliar…Raychaudhuri, TCAT/starCAT, Nat Methods 22:1964–1980 (2025) [V] (re-checked in A2)
+- Nofech-Mozes…Abelson, ITHmapper, bioRxiv 2026 [V] (the 2026-10-16 review confirmed that it exists but could not verify its counts; October 2026 searches did not find it)
 - Grabski, Trippa, Parmigiani, Genome Biol 26:98 (2025) [V]
 - Tetris, AoAS 2023 [V]; APAFA, JASA 2026 [V]; SUFA, JASA 2025 [V]
 - Xue et al., BayesPowerNMF, PLoS CB 2026 [V]
@@ -654,7 +819,7 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 - CSI-GEP, Cell Genomics 2025 [V]
 - KINOMO [V]
 - CanSig benchmark, Cancer Res 86(4):873 (2026) [V, one sweep]
-- TCCA, bioRxiv 2026 [V]
+- TCCA, bioRxiv 2026 [V] (details re-checked in A2)
 - Tahoe-100M [V]
 - Numbat, CopyKAT, SCEVAN [V]
 - CellBender, SoupX, DecontX [V]
@@ -662,13 +827,35 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 - clonealign [V]
 - CalicoST [V+; journal unconfirmed]
 - Janesick 2023 [V; venue P]
-- Oliveira, Nat Genet 2025 [V]
+- Oliveira, Nat Genet 2025 [V] (re-checked in A2: FFPE blocks, no fresh-dissociated malignant cells found; not a fresh-versus-fixed twin)
 - Splatter, splatPop, scDesign3 [V]
 - Venet et al., PLoS CB 2011 [V]
 - Hotspot [V]
 - MOFA+ [V]
 - Replogle 2022 [P]
 - Greenwald GBM spatial [V; venue P]
+
+**A2. Checked for the 2026-10-17 revision.** These were checked by web search. Publisher, PMC, bioRxiv and arXiv pages could not be reached, so abstract wording comes from search snippets unless stated. GitHub content was read directly. Tags are as in the landscape: [V] found online, [V+] re-checked from source code/README, [P] partly verified, [U] unverified.
+- Baron et al., "The Stress-Like Cancer Cell State Is a Consistent Component of Tumorigenesis", Cell Systems 11(5):536–546.e7 (2020) [V]. One abstract sentence was matched by exact-phrase search. The paper argues that the stress-like state is real *in vivo* (zebrafish melanoma, spatial transcriptomics, human samples); it does not establish dissociation stress.
+- O'Flanagan et al., Genome Biol 20:210 (2019) [V]. Cold protease (6 °C) vs collagenase (37 °C); 155,165 cells from patient tumours, breast-cancer PDXs and cell lines; a 512-gene stress core. The patient tumour types and the EGA accession were not verified.
+- van den Brink et al., Nat Methods 14:935–936 (2017) [V]. Dissociation-induced expression in muscle stem cells.
+- Neuschulz et al., Mol Syst Biol 19:e11147 (2023; online December 2022) [V]. 4sU labelling during dissociation; the data seen were from mouse and zebrafish, and no human tumour data were found.
+- Jiménez-Gracia et al., FixNCut, Genome Biol 25:81 (2024) [V]. Tumour content and the size of the stress reduction were not checked.
+- Denisenko et al., Genome Biol 2020; Slyper et al., Nat Med 2020; Marsh et al., Nat Neurosci 2022 [P]. Their existence and topic were confirmed by search; the papers were not read.
+- Trinks et al., Cell Oncol 47:1221–1231 (2024) [P]. Patient-matched fresh, cryopreserved and FFPE lung cancer. The patient count and Flex use were not checked.
+- Xirenayi et al., ccRCC fresh / frozen snMultiome / FFPE snFlex, bioRxiv 10.1101/2025.11.25.690485 (2025) [P]. Patient matching, patient numbers and any stress or malignant-program results were not checked.
+- Oliveira et al., Nat Genet 57:1512–1523 (2025) [V]. Flex on 8 FFPE blocks (tumour and normal), Visium HD on 5 patients and Xenium on 4 tumours, all from the same FFPE blocks; the GitHub README lists FFPE as the only tissue preparation. No fresh-dissociated malignant cells were found. The material used for a T-cell immune-profiling arm mentioned on a 10x page was not confirmed, and the review's sub-claim that "the only fresh cells are sorted T cells" is unverified.
+- Kotliar et al., TCAT/starCAT, Nat Methods 22:1964–1980 (2025) [V]. The sentence on starCAT generalising to other cell types and tissues is near-verbatim from search results and was not checked on the article. The Flex caveat comes from the GitHub README [V+].
+- González-Bermejo et al., TCCA, bioRxiv 10.64898/2026.02.18.706316 (2026) [P]. 36 studies, 34 tumour types, about 537–540 patients plus 183 cell-line samples (sources differ), 43 MPs. The NMF pipeline and the hand-coded MP whitelist were read from GitHub code [V+]. The overlap with 3CA is not stated.
+- ISOMERIC, bioRxiv 10.1101/2025.04.21.649842 (2025) [V]. Authors and publication status were not checked.
+- Denault, Tayeb, Carbonetto, Willwerscheid, Stephens, cEBMF, arXiv 2505.11639, NeurIPS 2025 [V]. No application to tumour MPs was found; calling it a "GBCD successor" is an interpretation, not the authors'.
+- Xia, Cao, Gao, DECIPHER, Nat Commun 16 (2025), doi 10.1038/s41467-025-63140-8 [V].
+- Dong, Kluger, Fan, Kluger, SIMVI, Nat Commun 16:2990 (2025) [V].
+- Wang, Lin, Zhao, FDR control via data splitting for testing after clustering, arXiv 2410.06451 (2024) [V].
+- Xu…Ma, Gene Program Dictionary, bioRxiv 10.1101/2025.10.29.685322 (2025) [P]. Details come from search snippets.
+- scPFA, lineage-informed factor analysis of heritable programs, bioRxiv 10.64898/2026.09.21.753290 (2026) [U]. Found by search; the abstract was not retrieved.
+- Possible extra protocol-twin data [P]: a GEM-X Flex performance preprint, bioRxiv 10.64898/2026.03.06.710062, and a Frontiers 2026 brief report on matched FFPE and frozen samples (reportedly 12 pairs; tumour types unknown). Neither was checked.
+- Tyler et al., 3CA v2: the publication in Nature Cancer (2025) was re-confirmed; the citation in A is unchanged.
 
 **B. Cited by referees as verified in their own sessions, not in the landscape and not re-checked by the PI. Verify before writing:**
 - CS-CORE, Nat Commun 14:4846 (2023)
@@ -677,26 +864,17 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 - Langfelder et al., PLoS CB 2011; NetRep, Cell Systems 2016
 - Wang, Xu, Zhao, Wang, data thinning for Poisson factor models, JASA (2025/26)
 - Nomura et al. / Tirosh lab, Nat Genet 57:1155–1167 (2025) (landscape listed it as [P])
-- ISOMERIC, bioRxiv 10.1101/2025.04.21.649842
 - CLCC, bioRxiv 10.64898/2026.03.01.708901
 - subclonal-dosage preprint, bioRxiv 10.64898/2026.03.15.711906
 - TreeAlign (venue unverified)
-- Neuschulz et al., MSB 19:e11147 (2023)
-- Marsh et al., Nat Neurosci 25:306–316 (2022)
-- O'Flanagan et al., Genome Biol 2019 (landscape listed it as [U])
-- Baron et al., Cell Systems 11:536 (2020)
-- FixNCut, Genome Biol 25:81 (2024)
-- Trinks et al. 2024 (3 LUAD patients)
-- ccRCC protocol benchmark, bioRxiv 2025.11.25.690485
+- Marsh et al., Nat Neurosci 25:306–316 (2022) (existence confirmed in A2; volume and pages not re-checked)
 - inVAE, bioRxiv 2024
 - sysVI, BMC Genomics 2025
-- covariate-moderated EBMF, arXiv 2505.11639
 - Weine et al., log1p Poisson NMF, arXiv 2601.05845
 - Miller & Dunson, coarsened posteriors, JASA 2019
 - Bogomolov & Heller, Stat Sci 2023
 - Emery et al., arXiv 1907.01458
 - Sarkar & Stephens, Nat Genet 2021
-- Gene Program Dictionary, bioRxiv 2025.10.29.685322
 - Hong et al. GPAS NSCLC atlas, bioRxiv 2025.05.06.652317
 - multiGroupVI, MLCB 2022
 - Xenium contamination paper, Nat Methods 2026 (title only)
@@ -711,7 +889,18 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 - empirical-Bayes deconvolution / ashr
 - Shah & Peters 2020
 - Elias & Gygi 2007
-- dissociation papers van den Brink 2017, Denisenko 2020, Slyper 2020
 - CytoTRACE
 
-The scoop search of 2026-10-02 was proxy-limited, so the absence of a direct precedent is weak evidence. The manual check in P8 is mandatory.
+(The dissociation papers van den Brink 2017, Denisenko 2020 and Slyper 2020, previously listed here, moved to A2.)
+
+The scoop search of 2026-10-02 was proxy-limited, so the absence of a direct precedent is weak evidence. A second search in October 2026 found no published or preprint method that does any of the following:
+- calibrates error rates for recurrent tumour metaprograms;
+- types them by provenance against within-sample negative controls;
+- audits the 3CA/Gavish MPs.
+
+That search used about 14 targeted web searches, without bioRxiv full-text search, PubMed or citing-paper lists, so it is still weak evidence. The nearest work does one of three things:
+- separates CN-dependent variation within tumours (ISOMERIC);
+- disentangles spatial context (SIMVI, DECIPHER);
+- controls FDR for post-clustering tests (Wang et al. 2024).
+
+TCCA repeats the standard pipeline with manual curation. The manual check in P8 is mandatory.

@@ -23,7 +23,8 @@ Freeze the `decision` block of the config — especially the pre-declared lists 
     by an overlap of ≥ 10 genes): such MPs cannot count through criterion (b). IFN response or hypoxia are
     expected to co-vary with TME cells while being real.
   - *Dosage*: an MP whose genes are arm-enriched (q excluding known gene families < 0.05) or that a dosage decoy
-    arm (CNA clone) recruits (≥ 2 hits, `kappa_retained` ≥ 0.5) is labelled **dosage** and never counted: it is
+    arm (CNA clone) recruits (≥ 2 hits among ≥ 5 decoys, `kappa_retained` ≥ 0.5) is labelled **dosage** and never
+    counted: it is
     genetic, not technical nuisance.
 - **Nuisance support**, any of:
   - **(a) technical decoys**: a technical decoy arm recruits the MP in ≥ 2 of ≥ 5 decoys, and the decoys keep
