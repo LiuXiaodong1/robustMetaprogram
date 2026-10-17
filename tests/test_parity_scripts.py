@@ -149,6 +149,40 @@ def test_matrix_mismatch_is_invalid(parity_run, tmp_path):
     assert s["verdict"] == "INVALID" and "sum/max" in s["issues"][0]
 
 
+def test_report_flags_a_tol_looser_than_parity(parity_run):
+    """CONFIG keeps the audit default tol (1e-7): the report says so and gives the parity advice."""
+    s, root = parity_run["summary"], parity_run["root"]
+    assert parity_run["params"].tol == 1e-7 > pio.PARITY_TOL == 1e-8
+    assert s["tol"] == 1e-7 and any("tol=1e-07" in n and "1.0e-8" in n for n in s["notes"])
+    report = (root / "report" / "report.md").read_text()
+    assert "port tol 1e-07, max_iter 5000" in report
+
+
+def test_fail_advice_lowers_tol_below_the_parity_setting():
+    """The advice used to be 'lower tol (e.g. 1e-7)', the audit default, which changes nothing."""
+    text = parity_compare.guide(50)
+    assert "1.0e-8" in text and "1.0e-9" in text and "e.g. 1e-7" not in text
+    readme = (PARITY / "README.md").read_text()
+    assert "tol: 1.0e-8" in readme and "1.0e-9" in readme and "(e.g.\n1e-7)" not in readme
+
+
+def test_export_converts_yaml_tol_and_checks_keys(parity_run, tmp_path):
+    yaml = pytest.importorskip("yaml")
+    adata, notes = parity_run["adata"], []
+    cfg = {**CONFIG, "gavish": {**CONFIG["gavish"], **yaml.safe_load("tol: 1e-8")}}
+    assert cfg["gavish"]["tol"] == "1e-8"  # PyYAML reads it as a string
+    manifest = export_matrices.export(adata, cfg, tmp_path / "e1", n=1, log=notes.append)
+    assert manifest["gavish"]["tol"] == 1e-8 and pio.params_from_manifest(manifest).tol == 1e-8
+    assert not any("note" in n for n in notes)
+    export_matrices.export(adata, CONFIG, tmp_path / "e2", n=1, log=notes.append)
+    assert any("gavish.tol: 1.0e-8" in n for n in notes)  # the audit default is flagged
+    bad = {**CONFIG, "keys": {"sample": "sample", "malignant": "malignant"},
+           "gavish": {**CONFIG["gavish"], "v2_gene_order": True}}
+    with pytest.raises(ValueError, match="keys.study"):
+        export_matrices.export(adata, bad, tmp_path / "e3", n=1, log=notes.append)
+    assert not (tmp_path / "e3").exists()  # nothing written
+
+
 def test_verdict_rules():
     def summ(median, robust=1.0, mp=1.0, mp_tested=True):
         return {"summary": {"median_overlap": median, "robust_agreement": robust, "mp_agreement": mp,

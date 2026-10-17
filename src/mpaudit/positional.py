@@ -11,12 +11,15 @@ come from a UCSC ``cytoBand.txt`` (centromere = ``acen`` bands; :func:`load_cyto
 The same sources give gene lengths (:func:`gene_lengths`) for the typer's gene-length features.
 Length here is the genomic span of the GTF ``gene`` record (first to last base of any transcript,
 introns included), which is what governs how many intronic reads a gene collects in
-single-nucleus data; it is not the mature transcript length.
+single-nucleus data; it is not the mature transcript length. GTFs without ``gene`` records (e.g.
+UCSC's ``ncbiRefSeq.gtf`` and ``knownGene.gtf``) give the same span from the gene's transcript,
+exon and other records, with a warning.
 """
 from __future__ import annotations
 
 import gzip
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -52,24 +55,55 @@ def centromeres(cyto: pd.DataFrame) -> dict[str, float]:
 
 
 def gene_positions_from_gtf(path: str | Path, name_attr: str = "gene_name") -> pd.DataFrame:
-    """Chromosome, start, end and length per gene from the ``gene`` records of a GTF (optionally gzipped).
+    """Chromosome, start, end and length per gene from a GTF (optionally gzipped).
 
     Indexed by ``name_attr``. Coordinates are GTF's (1-based, closed), so ``length = end - start + 1``
-    bp. A name with several ``gene`` records (e.g. PAR genes on X and Y) keeps the first.
+    bp. Spans come from the ``gene`` records (GENCODE, Ensembl); a name with several ``gene``
+    records (e.g. PAR genes on X and Y) keeps the first.
+
+    For a GTF without any ``gene`` record (e.g. UCSC ``ncbiRefSeq.gtf``/``knownGene.gtf``, which
+    have only transcript, exon, CDS and codon lines) the span is aggregated over all records of
+    each name instead (min start, max end), on one chromosome: the first one the name appears on,
+    preferring primary chromosomes over contigs whose name has an underscore
+    (``chr7_KI270803v1_alt``, ``chrUn_...``); records on other chromosomes are ignored. This
+    fallback warns (``UserWarning``). So does a GTF in which no record carries ``name_attr``: the
+    table is then empty, which leaves every gene without a position or length.
     """
     pat = re.compile(rf'{name_attr} "([^"]+)"')
-    rows = []
+    genes = []
+    spans: dict[str, list] = {}  # name -> [chrom, start, end] from non-gene records, while no gene record is seen
     opener = gzip.open if str(path).endswith(".gz") else open
     with opener(path, "rt") as fh:
         for line in fh:
             if line.startswith("#"):
                 continue
             f = line.split("\t")
-            if len(f) < 9 or f[2] != "gene":
+            if len(f) < 9:
+                continue
+            is_gene = f[2] == "gene"
+            if not is_gene and genes:
                 continue
             m = pat.search(f[8])
-            if m:
-                rows.append((m.group(1), _norm_chrom(f[0]), int(f[3]), int(f[4])))
+            if not m:
+                continue
+            name, chrom, start, end = m.group(1), _norm_chrom(f[0]), int(f[3]), int(f[4])
+            if is_gene:
+                genes.append((name, chrom, start, end))
+                spans = {}
+                continue
+            cur = spans.get(name)
+            if cur is None or ("_" in cur[0] and "_" not in chrom):
+                spans[name] = [chrom, start, end]
+            elif chrom == cur[0]:
+                cur[1], cur[2] = min(cur[1], start), max(cur[2], end)
+    rows = genes
+    if not genes and spans:
+        warnings.warn(f"{path}: no 'gene' records; spans of {len(spans)} genes taken from their transcript/exon "
+                      f"records (min start, max end per {name_attr})", UserWarning, stacklevel=2)
+        rows = [(name, *span) for name, span in spans.items()]
+    elif not genes:
+        warnings.warn(f"{path}: no record carries a {name_attr} attribute; no gene positions", UserWarning,
+                      stacklevel=2)
     df = pd.DataFrame(rows, columns=["gene", "chromosome", "start", "end"]).drop_duplicates("gene").set_index("gene")
     df["length"] = df["end"] - df["start"] + 1
     return df

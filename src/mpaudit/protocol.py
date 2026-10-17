@@ -26,8 +26,9 @@ limit of drawing many: no control-sampling noise, which would differ between the
 that bins, controls and the prevalence threshold (the ``high_quantile`` of the scores) are computed
 separately within each protocol, on the malignant cells of the *paired* tumours under it. With bins
 pooled across protocols, gene-wise capture moves set and control genes differently and can look like
-loss (on the toy, the 12 cycle genes captured worst under the fixed protocol lose intensity beyond
-the replicate null in 3 of 4 tumours with pooled controls, 1 of 4 with protocol-specific ones).
+loss (on the small test cohort, the 12 cycle genes captured worst under the fixed protocol lose
+intensity beyond the replicate null in 2 of 4 tumours with pooled controls, none with
+protocol-specific ones).
 Each protocol's pool is restricted to the paired tumours because pools of different tumours let
 tumour composition masquerade as a protocol shift: with all of each protocol's samples on the toy,
 EMT (more prevalent under the fixed protocol) came out as a loss in 3 of 4 tumours. The price of
@@ -39,25 +40,56 @@ paired tumour while its mean intensity change is about 0; the tumours whose inte
 the null are those whose fresh piece was more stressed than the other paired tumours'. Intensity
 uses all of the MP's genes in ``var_names``, not the panel.
 
-**Nulls.** ``replicates``: same-protocol pairs of samples of one tumour (pieces from different
-regions), used when an MP has >= ``min_pairs`` (3) such pairs. A change counts as beyond the null
-when it exceeds the 95th percentile of the replicates' absolute changes, in the tested direction
-(with 3 pairs, close to the largest replicate change). This null contains regional heterogeneity,
-but most public protocol twins have no replicate pieces.
+**Nulls.** Each statistic gets its own null, chosen per MP from the replicate pairs in which that
+statistic is finite (κ is NaN where the MP's panel is too small, so an MP restricted to some tumours
+can have replicates for intensity but not for κ, and then gets random sets for κ).
+
+``replicates``: same-protocol pairs of samples of one tumour (pieces from different regions), used
+when pairs with a finite change come from >= ``min_pairs`` (3) distinct tumours. The bounds are a
+one-sided 95% prediction bound for a new change, ``-/+ t(0.95, df) * s`` (:func:`replicate_bound`):
+``s = sqrt(mean d_i^2)`` over the signed replicate changes ``d_i`` (the order within a pair is
+arbitrary, so their mean is 0), and ``df`` is the number of distinct tumours behind the pairs, since
+pairs of a tumour with three or more pieces share pieces and are not independent (counting tumours
+is conservative then). Calibration: with no protocol effect and paired and replicate changes
+exchangeable and normal, a tumour is a loss by chance in 5% of cases (κ: at most 5%, given the
+margin below) whatever the number of tumours (Monte Carlo with 3, 5 and 10 replicate tumours: 0.050
+per tumour; 0.034 for >= 2 of 4 paired tumours with 3). The empirical 95th percentile of 3 absolute
+changes, used before, gave 0.13 per tumour and 0.11 for >= 2 of 4. This null contains regional
+heterogeneity, but most public protocol twins have no replicate pieces.
+
 Otherwise ``random_sets``: per paired tumour, ``n_null_sets`` random gene sets drawn from the
 tumour's panel, matched gene by gene to the MP's panel genes on mean-expression and detection bins
 in the tumour's reference-protocol cells (:func:`mpaudit.coexpr.matched_random_sets`), and evaluated
 like the MP in the same samples (κ on the same cells, intensity with the same protocol-specific
-control machinery). A tumour's change counts as a loss when it is below the 5th percentile of that
-tumour's random-set changes (a gain: above the 95th; at least ``MIN_RANDOM_SETS`` finite changes
-are needed, otherwise the tumour is not tested). This null captures shifts shared by all genes
-(capture, depth, estimation noise of κ) but not regional heterogeneity: two pieces that differ in a
-program's activity look like a protocol effect, so for a program whose activity varies between
-pieces (hypoxia on the toy) intensity changes beyond this null are expected without any protocol
-effect. Random sets have κ near 0, often under the floor, so their Δlog κ spreads widely on the log
-scale: the null is wide for κ (only large losses pass) and, when nearly all random sets are floored
-in both protocols, collapses to 0 (then reported as untestable: NaN). Prevalence has no random-set
-null (its threshold would need every random set scored on the whole pool).
+control machinery). Per tumour, the bounds come from the 5th and 95th percentiles of the random
+sets' changes; at least ``MIN_RANDOM_SETS`` finite changes are needed and the two percentiles must
+differ, otherwise the tumour is not tested (NaN). Intensity is compared with these percentiles
+directly. κ is not: random sets have κ near 0 while an MP's κ is usually far higher, and an
+additive change in background κ (on the toy, the random sets' median κ changes by -0.016 to +0.020
+between protocols, depending on tumour and matching) is a large change on the log scale near 0 and
+a negligible one at the MP's level. Compared on the log scale, the random sets' Δlog κ called
+unchanged MPs losses when background κ rose and hid twofold losses when the sets sat near the
+floor. The percentiles ``q05``, ``q95`` of the random
+sets' *linear* changes ``κ_test - κ_ref`` are therefore carried to the MP's level:
+``null_lo = log(max(κ_ref + q05, floor)) - log κ_ref`` and likewise ``null_hi``, with ``κ_ref`` the
+MP's floored reference κ. This null holds what all genes share (capture, depth, ambient
+co-expression, estimation noise of near-zero correlations) as an additive change in κ; a shared
+proportional change is not in it. It holds neither the MP's own sampling noise (for a coherent
+program κ depends on how many sampled cells are in the state) nor regional heterogeneity: two pieces
+that differ in a program's activity look like a protocol effect. It is therefore narrow for κ (on
+the toy, within +-0.17 for stress, cycle, hypoxia, EMT and abundance) and, used alone, would call 3
+losses and 7 gains among the 32 tumour tests of the eight toy programs the protocol leaves alone;
+the margin below removes all of them. Likewise, for a program whose activity varies between pieces
+(hypoxia on the toy), intensity changes beyond this null are expected without any protocol effect.
+Prevalence has no random-set null (its threshold would need every random set scored on the whole
+pool).
+
+**Minimum effect (κ).** A κ change counts as a loss only when ``Δlog κ < min(null_lo,
+-kappa_min_effect)`` and as a gain only when ``Δlog κ > max(null_hi, kappa_min_effect)``, with
+``kappa_min_effect = log 1.5`` (``KAPPA_MIN_EFFECT``, the proposal's equivalence margin for Δlog κ).
+A null can be narrower than any change that matters (many cells, a tight replicate set, or the
+random-set null above), and the margin keeps such changes, and shared proportional shifts below
+1.5-fold, out of criterion (c). Intensity and prevalence are informational and have no margin.
 
 **Data.** Oliveira et al. (Nat Genet 2025) is NOT a fresh-vs-fixed twin: its Chromium Flex, Visium HD
 and Xenium data come from the same FFPE blocks and no fresh-dissociated malignant cells were found,
@@ -74,12 +106,14 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from scipy import stats
 
 from .coexpr import kappa, matched_random_sets
 from .data import Keys, get_counts, log2_cpm10, malignant_mask
 
 KAPPA_FLOOR = 0.01
-MIN_PAIRS = 3
+KAPPA_MIN_EFFECT = float(np.log(1.5))  # smallest |Δlog κ| counted as a loss or gain (the proposal's margin)
+MIN_PAIRS = 3  # distinct tumours with same-protocol replicate pairs needed for the replicate null
 MIN_RANDOM_SETS = 20  # finite random-set changes needed for a tumour's 5th/95th percentiles
 N_BINS = 30  # expression bins for control genes, as in mpaudit.scoring
 METRICS = ("kappa", "intensity", "prevalence")
@@ -303,13 +337,15 @@ def _delta_name(metric: str) -> str:
 
 
 def _replicate_deltas(levels: pd.DataFrame, metrics: list[str], kappa_floor: float) -> pd.DataFrame:
-    """Changes between every two samples of one tumour under the same protocol, per MP."""
+    """Changes between every two samples of one tumour under the same protocol, per MP (one row per pair)."""
+    keys = ["mp", "tumour", "protocol"]
+    multi = levels[levels.groupby(keys, sort=False)["mp"].transform("size") > 1]
     out = []
-    for (mp, _, _), g in levels.groupby(["mp", "tumour", "protocol"], sort=False):
+    for (mp, tumour, _), g in multi.groupby(keys, sort=False):
         v = {m: _transform(m, g[m], kappa_floor) for m in metrics}
         for i, j in itertools.combinations(range(len(g)), 2):
-            out.append({"mp": mp, **{m: v[m][j] - v[m][i] for m in metrics}})
-    return pd.DataFrame(out, columns=["mp", *metrics])
+            out.append({"mp": mp, "tumour": tumour, **{m: v[m][j] - v[m][i] for m in metrics}})
+    return pd.DataFrame(out, columns=["mp", "tumour", *metrics])
 
 
 def _paired_deltas(df: pd.DataFrame, by: list[str], metrics: list[str], reference: str, test: str,
@@ -326,58 +362,103 @@ def _paired_deltas(df: pd.DataFrame, by: list[str], metrics: list[str], referenc
     return d
 
 
-def _null_types(levels: pd.DataFrame, reps: pd.DataFrame, min_pairs: int, random_sets: bool) -> pd.DataFrame:
-    """Per MP: ``null_type`` and ``n_null_pairs`` (same-protocol replicate pairs)."""
-    mps = pd.unique(levels["mp"])
-    n = reps["mp"].value_counts().reindex(mps, fill_value=0).astype(int)
-    kind = np.where(n >= min_pairs, "replicates", "random_sets" if random_sets else "none")
-    return pd.DataFrame({"null_type": kind, "n_null_pairs": n.to_numpy()}, index=pd.Index(mps, name="mp"))
+def replicate_bound(deltas: np.ndarray, n_tumours: int) -> float:
+    """One-sided 95% prediction bound for a new change from signed replicate changes: ``t_{0.95, n_tumours} * s``.
+
+    ``s = sqrt(mean(deltas**2))``: the order within a replicate pair is arbitrary, so the changes
+    have mean 0 and ``s`` estimates their standard deviation without subtracting a mean. The degrees
+    of freedom are the number of distinct tumours behind the pairs (pairs of one tumour with three or
+    more pieces share pieces and are not independent). NaN without finite changes or tumours.
+    """
+    d = np.asarray(deltas, dtype=float)
+    d = d[np.isfinite(d)]
+    if d.size == 0 or n_tumours < 1:
+        return np.nan
+    return float(stats.t.ppf(0.95, n_tumours) * np.sqrt(np.mean(d**2)))
+
+
+def _null_types(levels: pd.DataFrame, reps: pd.DataFrame, metrics: list[str], min_pairs: int,
+                random_metrics: list[str]) -> pd.DataFrame:
+    """Per MP and statistic ``m``: ``null_type_m``, ``n_null_pairs_m``, ``n_null_tumours_m`` and ``bound_m``.
+
+    Only replicate pairs whose change in ``m`` is finite count, so an MP whose κ is NaN in its
+    replicate tumours falls back to the random-set null for κ while intensity can keep its replicates.
+    ``bound_m`` is the replicate prediction bound (NaN unless ``null_type_m == "replicates"``).
+    """
+    mps = pd.Index(pd.unique(levels["mp"]), name="mp")
+    out = pd.DataFrame(index=mps)
+    need = max(int(min_pairs), 1)
+    for m in metrics:
+        r = reps.loc[np.isfinite(reps[m].to_numpy(float)), ["mp", "tumour", m]]
+        g = r.groupby("mp", sort=False)
+        n_pairs = g.size().reindex(mps, fill_value=0).astype(int)
+        n_tumours = g["tumour"].nunique().reindex(mps, fill_value=0).astype(int)
+        enough = (n_tumours >= need).to_numpy()
+        out[f"null_type_{m}"] = np.where(enough, "replicates", "random_sets" if m in random_metrics else "none")
+        out[f"n_null_pairs_{m}"], out[f"n_null_tumours_{m}"] = n_pairs, n_tumours
+        bound = {mp: replicate_bound(x.to_numpy(), int(n_tumours[mp])) for mp, x in g[m]}
+        out[f"bound_{m}"] = np.where(enough, pd.Series(bound, dtype=float).reindex(mps).to_numpy(), np.nan)
+    return out
+
+
+def _random_set_bounds(nd: pd.DataFrame, metric: str) -> tuple[pd.Series, pd.Series]:
+    """Per (MP, tumour): 5th and 95th percentiles of the random sets' changes (κ: linear ``κ_test - κ_ref``).
+
+    NaN with fewer than ``MIN_RANDOM_SETS`` finite changes, or when the two percentiles coincide
+    (every random set changed identically, e.g. all at κ 0 in both protocols).
+    """
+    x = nd[f"{metric}_test"] - nd[f"{metric}_reference"] if metric == "kappa" else nd[metric]
+    g = x.groupby(level=["mp", "tumour"], sort=False)
+    enough = g.count() >= MIN_RANDOM_SETS
+    q05, q95 = g.quantile(0.05).where(enough), g.quantile(0.95).where(enough)
+    collapsed = q05 >= q95
+    return q05.mask(collapsed), q95.mask(collapsed)
 
 
 def _shifts(levels: pd.DataFrame, reference: str, test: str, null_levels: pd.DataFrame | None, min_pairs: int,
-            kappa_floor: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+            kappa_floor: float, kappa_min_effect: float) -> tuple[pd.DataFrame, pd.DataFrame]:
     """``(per_tumour, null types)``; see :func:`tumour_shifts`."""
     metrics = [m for m in METRICS if m in levels]
     reps = _replicate_deltas(levels, metrics, kappa_floor)
-    types = _null_types(levels, reps, min_pairs, null_levels is not None)
+    random_metrics = [m for m in metrics if null_levels is not None and m in null_levels]
+    types = _null_types(levels, reps, metrics, min_pairs, random_metrics)
     d = _paired_deltas(levels, ["mp", "tumour"], metrics, reference, test, kappa_floor)
+    row_mp = d.index.get_level_values("mp")
+    kind = {m: types[f"null_type_{m}"].reindex(row_mp).to_numpy() for m in metrics}
 
     lo = pd.DataFrame(np.nan, index=d.index, columns=metrics)
     hi = lo.copy()
-    by_replicates = types.index[types["null_type"] == "replicates"]
-    for mp in by_replicates:
-        rows = d.index.get_level_values("mp") == mp
-        for m in metrics:
-            v = np.abs(reps.loc[reps["mp"] == mp, m].to_numpy(float))
-            v = v[np.isfinite(v)]
-            if v.size >= min_pairs:
-                q = float(np.quantile(v, 0.95))
-                lo.loc[rows, m], hi.loc[rows, m] = -q, q
-    if null_levels is not None and not null_levels.empty:
-        nm = [m for m in metrics if m in null_levels]
-        nd = _paired_deltas(null_levels[~null_levels["mp"].isin(by_replicates)], ["mp", "tumour", "set"], nm,
-                            reference, test, kappa_floor)[nm]
-        g = nd.groupby(level=["mp", "tumour"])
-        enough = g.count() >= MIN_RANDOM_SETS
-        q05, q95 = g.quantile(0.05).where(enough), g.quantile(0.95).where(enough)
-        collapsed = q05 >= q95  # e.g. every random set under the kappa floor in both protocols
-        q05, q95 = q05.mask(collapsed), q95.mask(collapsed)
-        common = d.index.intersection(q05.index, sort=False)
-        lo.loc[common, nm] = q05.loc[common, nm].to_numpy()
-        hi.loc[common, nm] = q95.loc[common, nm].to_numpy()
+    for m in metrics:
+        b = np.where(kind[m] == "replicates", types[f"bound_{m}"].reindex(row_mp).to_numpy(float), np.nan)
+        lo[m], hi[m] = -b, b
+    if random_metrics and not null_levels.empty:
+        nd = _paired_deltas(null_levels, ["mp", "tumour", "set"], random_metrics, reference, test, kappa_floor)
+        for m in random_metrics:
+            q05, q95 = (q.reindex(d.index).to_numpy(float) for q in _random_set_bounds(nd, m))
+            if m == "kappa":  # carry the linear change of background κ to the MP's own κ level
+                base = np.maximum(d["kappa_reference"].to_numpy(float), kappa_floor)
+                with np.errstate(invalid="ignore"):
+                    q05 = np.log(np.maximum(base + q05, kappa_floor)) - np.log(base)
+                    q95 = np.log(np.maximum(base + q95, kappa_floor)) - np.log(base)
+            use = kind[m] == "random_sets"
+            lo.loc[use, m], hi.loc[use, m] = q05[use], q95[use]
 
     out = d.reset_index().rename(columns={m: _delta_name(m) for m in metrics})
-    out.insert(2, "null_type", out["mp"].map(types["null_type"]))
+    out.insert(2, "null_type", kind[metrics[0]] if metrics else "none")
     if "iota" in levels:
         iota = levels.groupby(["mp", "tumour"])["iota"].first()
         out.insert(3, "iota", iota.reindex(d.index).to_numpy())
     for m in metrics:
         delta, lo_m, hi_m = d[m].to_numpy(), lo[m].to_numpy(), hi[m].to_numpy()
         tested = np.isfinite(delta) & np.isfinite(lo_m) & np.isfinite(hi_m)
+        cut_lo, cut_hi = lo_m, hi_m
+        if m == "kappa":  # minimum effect on top of the null
+            cut_lo, cut_hi = np.minimum(lo_m, -kappa_min_effect), np.maximum(hi_m, kappa_min_effect)
+        out[f"null_type_{m}"] = kind[m]
         out[f"null_lo_{m}"], out[f"null_hi_{m}"] = lo_m, hi_m
         with np.errstate(invalid="ignore"):
-            out[f"loss_{m}"] = pd.array(np.where(tested, delta < lo_m, None), dtype="boolean")
-            out[f"gain_{m}"] = pd.array(np.where(tested, delta > hi_m, None), dtype="boolean")
+            out[f"loss_{m}"] = pd.array(np.where(tested, delta < cut_lo, None), dtype="boolean")
+            out[f"gain_{m}"] = pd.array(np.where(tested, delta > cut_hi, None), dtype="boolean")
     return out, types
 
 
@@ -389,37 +470,48 @@ def tumour_shifts(
     null_levels: pd.DataFrame | None = None,
     min_pairs: int = MIN_PAIRS,
     kappa_floor: float = KAPPA_FLOOR,
+    kappa_min_effect: float = KAPPA_MIN_EFFECT,
 ) -> pd.DataFrame:
     """Per MP and paired tumour: the ``test - reference`` change of each statistic, and whether it is beyond the null.
 
     ``levels`` has one row per sample and MP (``mp, tumour, protocol`` and any of ``kappa``,
     ``intensity``, ``prevalence``; e.g. from :func:`per_sample_kappa`). ``null_levels`` holds random
-    gene sets evaluated in the paired tumours (``mp, tumour, protocol, set`` and statistics); it is
-    used for MPs with fewer than ``min_pairs`` same-protocol replicate pairs. Columns: ``mp, tumour,
-    null_type``, ``iota`` (when in ``levels``) and per statistic the change (``delta_log_kappa``,
-    ``delta_<metric>``), the protocol means (``<metric>_reference``, ``<metric>_test``), the null
-    bounds ``null_lo_<metric>``, ``null_hi_<metric>`` (replicates: -/+ the 95th percentile of
-    absolute replicate changes; random sets: the tumour's 5th/95th percentiles) and
-    ``loss_<metric>``, ``gain_<metric>`` (change below/above the bound; NA when the change or the null
-    is undefined).
+    gene sets evaluated in the paired tumours (``mp, tumour, protocol, set`` and statistics); for each
+    statistic it is used for MPs whose same-protocol replicate pairs with a finite change come from
+    fewer than ``min_pairs`` distinct tumours. Columns: ``mp, tumour``, ``null_type`` (of the first
+    statistic present, κ when given), ``iota`` (when in ``levels``) and per statistic the change
+    (``delta_log_kappa``, ``delta_<metric>``), the protocol means (``<metric>_reference``,
+    ``<metric>_test``), ``null_type_<metric>`` (``replicates``, ``random_sets`` or ``none``), the null
+    bounds ``null_lo_<metric>``, ``null_hi_<metric>`` (replicates: -/+ :func:`replicate_bound`;
+    random sets: the tumour's 5th/95th percentiles, for κ carried to the MP's κ level as in the module
+    docstring) and ``loss_<metric>``, ``gain_<metric>`` (NA when the change or the null is undefined).
+    A κ loss needs ``delta_log_kappa < min(null_lo_kappa, -kappa_min_effect)`` and a gain
+    ``> max(null_hi_kappa, kappa_min_effect)``; intensity and prevalence are compared with the null
+    bounds alone.
     """
-    return _shifts(levels, reference, test, null_levels, min_pairs, kappa_floor)[0]
+    return _shifts(levels, reference, test, null_levels, min_pairs, kappa_floor, kappa_min_effect)[0]
 
 
 def _summarise(shifts: pd.DataFrame, types: pd.DataFrame) -> pd.DataFrame:
     metrics = [m for m in METRICS if f"loss_{m}" in shifts]
-    columns = ["mp", "null_type", "n_null_pairs", "n_paired_tumours", "iota"]
+    first = metrics[0] if metrics else None
+    columns = ["mp", "null_type", "n_null_pairs", "n_null_tumours", "n_paired_tumours", "iota"]
     for m in metrics:
-        columns += [f"mean_{_delta_name(m)}", f"frac_loss_beyond_null_{m}", f"frac_gain_beyond_null_{m}"]
+        columns += [f"null_type_{m}", f"mean_{_delta_name(m)}", f"frac_loss_beyond_null_{m}",
+                    f"frac_gain_beyond_null_{m}"]
+    by_mp = dict(tuple(shifts.groupby("mp", sort=False)))
     out = []
     for mp, row in types.iterrows():
-        t = shifts[shifts["mp"] == mp]
-        rec = {"mp": mp, "null_type": row["null_type"], "n_null_pairs": int(row["n_null_pairs"]),
-               "n_paired_tumours": int(t[f"loss_{metrics[0]}"].notna().sum()) if metrics else 0,
+        t = by_mp.get(mp, shifts.iloc[:0])
+        rec = {"mp": mp, "null_type": row[f"null_type_{first}"] if first else "none",
+               "n_null_pairs": int(row[f"n_null_pairs_{first}"]) if first else 0,
+               "n_null_tumours": int(row[f"n_null_tumours_{first}"]) if first else 0,
+               "n_paired_tumours": int(t[f"loss_{first}"].notna().sum()) if first else 0,
                "iota": float(t["iota"].median()) if "iota" in t and len(t) else np.nan}
         for m in metrics:
             delta = t[_delta_name(m)].to_numpy(float)
             loss, gain = t[f"loss_{m}"].dropna(), t[f"gain_{m}"].dropna()
+            rec[f"null_type_{m}"] = row[f"null_type_{m}"]
             rec[f"mean_{_delta_name(m)}"] = float(np.nanmean(delta)) if np.isfinite(delta).any() else np.nan
             rec[f"frac_loss_beyond_null_{m}"] = float(loss.mean()) if len(loss) else np.nan
             rec[f"frac_gain_beyond_null_{m}"] = float(gain.mean()) if len(gain) else np.nan
@@ -435,17 +527,20 @@ def protocol_shift(
     null_levels: pd.DataFrame | None = None,
     min_pairs: int = MIN_PAIRS,
     kappa_floor: float = KAPPA_FLOOR,
+    kappa_min_effect: float = KAPPA_MIN_EFFECT,
 ) -> pd.DataFrame:
     """Per MP: mean change and fraction of paired tumours with a loss (gain) beyond the null.
 
-    Arguments as for :func:`tumour_shifts`. Columns: ``mp, null_type`` (``replicates``,
-    ``random_sets``, or ``none`` when neither null is available), ``n_null_pairs`` (same-protocol
-    replicate pairs), ``n_paired_tumours`` (paired tumours tested for the first statistic present,
-    κ when given: change and null defined), ``iota`` (median over paired tumours), and per statistic
-    ``mean_delta_log_kappa`` / ``mean_delta_<metric>``, ``frac_loss_beyond_null_<metric>`` and
-    ``frac_gain_beyond_null_<metric>`` (over the paired tumours where that statistic was tested).
+    Arguments as for :func:`tumour_shifts`. Columns: ``mp``; for the first statistic present (κ when
+    given): ``null_type`` (``replicates``, ``random_sets``, or ``none`` when neither null is
+    available), ``n_null_pairs`` and ``n_null_tumours`` (same-protocol replicate pairs with a finite
+    change, and the distinct tumours they come from), ``n_paired_tumours`` (paired tumours tested:
+    change and null defined); ``iota`` (median over paired tumours); and per statistic
+    ``null_type_<metric>``, ``mean_delta_log_kappa`` / ``mean_delta_<metric>``,
+    ``frac_loss_beyond_null_<metric>`` and ``frac_gain_beyond_null_<metric>`` (over the paired
+    tumours where that statistic was tested).
     """
-    return _summarise(*_shifts(levels, reference, test, null_levels, min_pairs, kappa_floor))
+    return _summarise(*_shifts(levels, reference, test, null_levels, min_pairs, kappa_floor, kappa_min_effect))
 
 
 def protocol_shift_kappa(
@@ -459,6 +554,7 @@ def protocol_shift_kappa(
     min_pairs: int = MIN_PAIRS,
     n_null_sets: int = 100,
     kappa_floor: float = KAPPA_FLOOR,
+    kappa_min_effect: float = KAPPA_MIN_EFFECT,
     min_cells: int = 20,
     max_cells: int = 2000,
     min_detect: float = 0.05,
@@ -469,23 +565,25 @@ def protocol_shift_kappa(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Axis A4 end to end. Returns ``(per_mp, per_tumour, levels)``.
 
-    ``levels`` is :func:`per_sample_kappa` (same arguments, same values); MPs with fewer than
-    ``min_pairs`` same-protocol replicate pairs get the random-set null (``n_null_sets`` sets per
-    paired tumour, at least ``MIN_RANDOM_SETS``; 0 switches it off and leaves their null ``none``); ``per_tumour`` is
-    :func:`tumour_shifts` and ``per_mp`` :func:`protocol_shift`. Run time is dominated by the
-    random-set κ: about ``n_null_sets`` x MPs x samples of paired tumours evaluations of
-    :func:`mpaudit.coexpr.kappa`.
+    ``levels`` is :func:`per_sample_kappa` (same arguments, same values). Random sets are drawn
+    (``n_null_sets`` per paired tumour, at least ``MIN_RANDOM_SETS``; 0 switches them off and leaves
+    such nulls ``none``) for every MP whose replicate pairs with a finite κ, or a finite intensity,
+    come from fewer than ``min_pairs`` distinct tumours; ``per_tumour`` is :func:`tumour_shifts` and
+    ``per_mp`` :func:`protocol_shift`. Run time is dominated by the random-set κ: about
+    ``n_null_sets`` x MPs x samples of paired tumours evaluations of :func:`mpaudit.coexpr.kappa`.
     """
     rng_cells, rng_null = _rngs(seed)
     cohort = _prepare(adata, keys, reference, test, counts_layer=counts_layer, min_cells=min_cells,
                       max_cells=max_cells, min_detect=min_detect, rng=rng_cells)
     levels = _levels(cohort, gene_sets, min_iota=min_iota, min_genes=min_genes, high_quantile=high_quantile)
-    reps = _replicate_deltas(levels, [m for m in METRICS if m in levels], kappa_floor)
-    n_pairs = reps["mp"].value_counts()
-    need = [mp for mp in gene_sets if n_pairs.get(mp, 0) < min_pairs]
+    random_metrics = ["kappa", "intensity"]  # the statistics _random_set_levels evaluates
+    reps = _replicate_deltas(levels, random_metrics, kappa_floor)
+    types = _null_types(levels, reps, random_metrics, min_pairs, random_metrics)
+    lacking = (types[[f"null_type_{m}" for m in random_metrics]] != "replicates").any(axis=1)
+    need = [mp for mp in gene_sets if lacking.get(mp, True)]
     null_levels = None
     if need and n_null_sets > 0:
         null_levels = _random_set_levels(cohort, gene_sets, need, n_null_sets, min_iota=min_iota,
                                          min_genes=min_genes, rng=rng_null)
-    per_tumour, types = _shifts(levels, reference, test, null_levels, min_pairs, kappa_floor)
+    per_tumour, types = _shifts(levels, reference, test, null_levels, min_pairs, kappa_floor, kappa_min_effect)
     return _summarise(per_tumour, types), per_tumour, levels

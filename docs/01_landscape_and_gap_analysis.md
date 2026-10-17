@@ -14,7 +14,7 @@ As of 2026-10-02. This synthesises 5 independent literature sweeps, plus a re-ch
 > - **TCCA** described from its code: Gavish-style clustering of single-seed per-sample NMF, then a hand-coded whitelist of 43 MPs; a second example of irreproducible manual curation; cell-line samples must be excluded for tumour replication (§0, §1.2, §2A, §4, §6.1, G3).
 > - **Scoop and competitor update** (§2, §3, §6): ISOMERIC, cEBMF, DECIPHER, SIMVI, arXiv 2410.06451, Gene Program Dictionary, scPFA, PORCELAN, Spectra's artefact motivation, and the protocol-comparison papers that pre-empt parts of the stress result. A search-engine-only scoop check in October 2026 found no calibrated or provenance-typed MP method and no audit of 3CA (weak evidence).
 > - **Confounders** (§0, §1.2, §4, G2, G3): malignant→TME ambient spillover; expression-derived covariates as a caveat for decoys; gene-length / nuclear-fraction and abundance / %ribo axes, with the user-reported HER2 snRNA-seq evidence labelled as such. Numbers from the `mpaudit` toy simulator are labelled as toy results.
-> - The P1 GO / PIVOT / INCOMPLETE rule is not restated here; see the pointer under "Pilot analyses" (single source of truth: `src/mpaudit/report.py`, rule `P1-GO v1.0`).
+> - The P1 GO / PIVOT / INCOMPLETE rule is not restated here; see the pointer under "Pilot analyses" (single source of truth: `src/mpaudit/report.py`, rule `P1-GO v1.1`).
 
 ---
 
@@ -565,7 +565,7 @@ They are ranked by defensibility and impact. G1 to G4 form the recommended scien
 3. **Artefact predictability.** Can simple nuisance covariates (ambient profile similarity, doublet score, %mito/ribo, correlation with %ribo and intronic fraction, median gene length and fraction of genes > 100 kb, sc vs sn) separate the 11 hand-removed 3CA v2 MPs from retained ones? TCCA's whitelist (43 kept of at least 57) gives a second, independent set of curation decisions to test against.
 4. **Effect of centring.** Compare centred and uncentred per-tumour NMF against GBCD on CanSig datasets to size G5.
 
-Pilots 1–3 are implemented, in reduced form, as the P1 audit (`mpaudit`; see `docs/05_pilot_P1.md`). It runs a Python port of the 3CA code, not the R code itself; R-versus-port parity on real samples has not been tested yet (R was unavailable; the comparison scripts are in `scripts/parity/`). Its GO / PIVOT / INCOMPLETE decision follows the frozen rule **P1-GO v1.0**. The single source of truth is `src/mpaudit/report.py` (module docstring and `rule_text()`), and `docs/02` and `docs/05` state the same rule. It is deliberately not restated here, so that no fourth version can drift.
+Pilots 1–3 are implemented, in reduced form, as the P1 audit (`mpaudit`; see `docs/05_pilot_P1.md`). It runs a Python port of the 3CA code, not the R code itself; R-versus-port parity on real samples has not been tested yet (R was unavailable; the comparison scripts are in `scripts/parity/`). Its GO / PIVOT / INCOMPLETE decision follows the frozen rule **P1-GO v1.1**. The single source of truth is `src/mpaudit/report.py` (module docstring and `rule_text()`), and `docs/02` and `docs/05` state the same rule. It is deliberately not restated here, so that no fourth version can drift.
 
 ---
 

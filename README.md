@@ -16,7 +16,7 @@ Status: **design stage, plus the pilot audit (P1)**.
 
 P1 is the month-0–3 go/no-go gate of the proposal. It asks whether MPs that the standard
 pipeline produces, and curators keep, can be driven by technical nuisance, and decides with a
-frozen rule (`P1-GO v1.0`, `mpaudit.report`) that can fail.
+frozen rule (`P1-GO v1.1`, `mpaudit.report`) that can fail.
 
 | Axis | Module | Question |
 |---|---|---|
@@ -37,6 +37,8 @@ mpaudit p1 cohort.h5ad --config configs/p1_3ca_example.yaml --out results/p1 --n
 ```
 
 Outputs: `summary.md` (verdict, rule and tables), per-axis CSVs, `reference_mps.gmt`, `run_config.json`.
+`mpaudit p1` checks the config (the frozen `decision` block, decoy arms, label and gene-set files) before any
+NMF runs.
 
 R-versus-port parity: [scripts/parity/README.md](scripts/parity/README.md) (export the exact NMF inputs,
 run `NMF::nmf(method = "snmf/r")` in R, compare). Its R side has not yet been run.

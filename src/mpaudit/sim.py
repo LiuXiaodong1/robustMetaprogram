@@ -13,9 +13,15 @@ Planted in malignant cells:
   70% of tumours; a 2x gain at these expression levels was too weak for 3CA-style NMF to pick up);
 * nuisance: dissociation ``stress`` (immediate-early/heat-shock genes; sample-level intensity,
   shared by malignant and TME cells, absent under the fixed protocol), ambient RNA from TME cells
-  (per-cell fraction varies), and malignant-TME doublets. With ``doublet_cycle_coupling``
-  cycling cells have 1.3x depth and a doublet score shifted up by 0.3, so a real program is
-  correlated with the doublet covariate (cycling cells are larger and called doublets more often).
+  (per-cell fraction Beta(1, 20)), and malignant-TME doublets (4% of malignant cells). With
+  ``doublet_cycle_coupling`` cycling cells have 1.3x depth and a doublet score shifted up by 0.3,
+  so a real program is correlated with the doublet covariate (cycling cells are larger and called
+  doublets more often).
+
+TME cells (T, myeloid, fibroblast) have their own profiles: canonical markers at 40x and 30
+TME-enriched genes per type at 10x (``truth["tme_enriched"]``). The TME-enriched genes are drawn
+from all generic genes, so they can include planted program genes (never the technical-axis or
+lineage genes).
 
 Technical effects:
 
@@ -46,15 +52,23 @@ gene positions only, never from the truth: ``clone_est`` (inferCNV-like two-grou
 arm whose genes co-vary most), ``contamination_est`` (DecontX-like: share of counts on genes
 specific to the other compartment, relative to the soup) and ``doublet_est`` (expression-based:
 contamination estimate and library size). They are crude on purpose: they err, and the doublet
-estimate tracks cell size and hence cycling. Planted per-cell states are in ``truth["cells"]``.
+estimate tracks cell size and hence cycling. Because TME-enriched genes can include planted
+program genes, ``contamination_est`` (and ``doublet_est``, built from it) can also track a program
+by gene overlap; whether and how much depends on the seed (compare ``truth["tme_enriched"]`` with
+``truth["sets"]``). Planted per-cell states are in ``truth["cells"]``.
 
 Outcomes of an audit on this cohort are true by construction. Use it to check that code runs
 and that each axis responds as designed, not as evidence about real data. Each optional effect
-and each block of counts has its own random stream, so a flag set to False gives a paired
-ablation: same cells, programs, clones and depths, and identical counts wherever the effect does
-not act. With every flag off the model is the original one; its random draws differ from
-versions before the flags were added, and with few genes the programs are smaller because genes
-for the technical axes are set aside.
+either has its own random stream or makes its draws whatever its flag, and each block of counts
+(sample x compartment) has its own stream, so a flag set to False gives a paired ablation: same
+cells, program activities, clones (``cna=False`` merges them into one) and depths, and identical
+counts wherever the effect does not act. With ``malignant_ambient``, ``variable_prevalence``,
+``doublet_cycle_coupling``, ``technical_axes``, ``protocol_capture_bias`` and
+``estimated_covariates`` off (``dissociation_stress``, ``tme_contamination`` and ``cna`` on) the
+model is the original one; its random draws differ from versions before the flags were added, and
+with few genes the programs are smaller because genes for the technical axes are set aside.
+Turning off ``dissociation_stress``, ``tme_contamination``, ``cna`` and ``technical_axes`` instead
+gives the null cohort for the P1 rule (see :func:`simulate_cohort`).
 """
 from __future__ import annotations
 
@@ -225,6 +239,7 @@ def simulate_cohort(
     ``truth`` holds the planted gene sets (``sets``) and their kinds (``kinds``), a cytoband table,
     the private programs, which tumours carry IFN/EMT/CNA, ``expected_tme_shared``,
     ``hypoxia_fraction_by_sample``, ``tme_ambient_scale_by_sample``, ``malignant_markers``,
+    ``tme_enriched`` (TME cell type -> its 30 TME-enriched genes; may overlap planted programs),
     ``capture_efficiency`` (per gene; ones when off) and ``cells``: per-cell planted state (program
     activity, doublet, cytoplasmic factor, nuclear fraction), indexed like ``adata.obs``.
     """
@@ -358,15 +373,14 @@ def simulate_cohort(
         cyto_f, nuc, intronic = technical(rate)
         soup = (rate / rate.sum(axis=1, keepdims=True)).mean(axis=0)
 
-        # doublets with TME cells
-        doublet = rng.random(n_mal) < 0.04
+        # doublets with TME cells (drawn whatever the flag, like every draw below)
+        planted = rng.random(n_mal) < 0.04
         cts = list(tme_types)
-        for r in np.flatnonzero(doublet):
+        for r in np.flatnonzero(planted):
             prof = tme_profile[cts[rng.integers(len(cts))]]
             if tme_contamination:
                 rate[r] = rate[r] / rate[r].sum() + prof / prof.sum()
-        if not tme_contamination:
-            doublet = np.zeros(n_mal, bool)
+        doublet = planted if tme_contamination else np.zeros(n_mal, bool)
 
         # ambient RNA from TME profiles
         amb = sum(tme_profile.values())
@@ -383,7 +397,13 @@ def simulate_cohort(
             depth[cycling] *= 1.3
         blocks.append(_counts(rate, depth, 10.0, np.random.default_rng(count_seeds.spawn(1)[0])))
         for c in range(n_mal):
-            score = rng.beta(8, 2) if doublet[c] else rng.beta(2, 8)
+            # The draw's shapes follow the planted status, not the flag: Beta sampling uses rejection,
+            # so how many variates it takes depends on the shapes, and following the flag would shift
+            # every later draw when tme_contamination is off. A doublet the flag removed gets
+            # 1 - Beta(8, 2), which is Beta(2, 8) like any singlet's score.
+            score = rng.beta(8, 2) if planted[c] else rng.beta(2, 8)
+            if planted[c] and not doublet[c]:
+                score = 1.0 - score
             if doublet_cycle_coupling and cycling[c] and not doublet[c]:
                 score = min(score + 0.3, 1.0)
             obs_rows.append({"sample": s_name, "tumour": t, "protocol": protocol, "region": region,
@@ -463,6 +483,7 @@ def simulate_cohort(
              "hypoxia_fraction_by_sample": hyp_frac,
              "tme_ambient_scale_by_sample": amb_scale,
              "malignant_markers": list(genes[lineage]) if malignant_ambient else [],
+             "tme_enriched": {ct: list(genes[idx]) for ct, idx in zip(tme_types, tme_enriched)},
              "capture_efficiency": pd.Series(capture, index=genes, name="capture_efficiency"),
              "cells": cells}
     return adata, truth

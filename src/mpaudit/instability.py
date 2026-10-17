@@ -18,7 +18,7 @@ import pandas as pd
 
 from .compare import match_sets, summarize_match
 from .data import Keys, sample_map
-from .gavish import GavishParams, GavishResult, NMFCache, assemble, compute_programs
+from .gavish import GavishParams, GavishResult, NMFCache, assemble, check_keys, compute_programs
 
 METHOD_VARIANT = "method_variant"
 
@@ -97,6 +97,16 @@ def run_instability(
     reference: GavishResult | None = None,
     log=print,
 ) -> InstabilityResult:
+    """Run the reference (unless given) and every perturbation, and match each perturbed MP set
+    to the reference.
+
+    Every perturbed :class:`GavishParams` is built and checked (:func:`mpaudit.gavish.check_keys`)
+    before the first fit, so a bad perturbation fails before any NMF rather than after the
+    reference and the perturbations before it.
+    """
+    perturbed = [base.replace(**p.params) for p in perturbations]
+    for params in [base, *perturbed]:
+        check_keys(keys, params, adata, recurrence_key=recurrence_key)
     cache = cache or NMFCache()
     unit = sample_map(adata, keys, recurrence_key) if recurrence_key else None
     study = sample_map(adata, keys, keys.study) if keys.study else None
@@ -113,8 +123,8 @@ def run_instability(
     log(f"[instability] reference: {len(ref.robust)} robust programs, {len(ref_sets)} MPs")
 
     runs, rows, matches = {}, [], {}
-    for p in perturbations:
-        res = run(base.replace(**p.params), p)
+    for p, params in zip(perturbations, perturbed):
+        res = run(params, p)
         alt = res.mp_sets()
         runs[p.name] = alt
         m = match_sets(ref_sets, alt, min_jaccard)

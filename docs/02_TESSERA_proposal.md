@@ -4,16 +4,17 @@
 Date: 2026-10-02. Inputs: the landscape and gap analysis ([01_landscape_and_gap_analysis.md](01_landscape_and_gap_analysis.md)), four method concepts (CREDO, CALIPER, InvarMP, CERT-MP), and eight adversarial referee reports ([03_design_panel.md](03_design_panel.md)).
 
 **Revision note (2026-10-17).** Revised in response to the review of 2026-10-16 (code, citations and referee outputs of commit 7f4867e). What changed and why:
-1. **One P1 GO rule.** The text gave three different P1 gates, and the coded one could pass on almost any cohort. §0, §7 and §8 now state one frozen rule, **P1-GO v1.0**, as implemented in `src/mpaudit/report.py`. Dosage and instability no longer count toward GO. Decoys run through the Python port, not the original R code, and this is now said.
+1. **One P1 GO rule.** The text gave three different P1 gates, and the coded one could pass on almost any cohort. §0, §7 and §8 now state one frozen rule, **P1-GO v1.1**, as implemented in `src/mpaudit/report.py`. Dosage and instability no longer count toward GO. Decoys run through the Python port, not the original R code, and this is now said.
 2. **Null-relative thresholds.** The fixed partial R² bars of P1 and P6 sat below the random-gene-set null on the toy (null q95 0.35–0.66 in the reviewed demo, up to 0.78 in the current toy). They are replaced by "above the matched-null q99" (§2.5, §8).
 3. **A1 spillover.** Malignant→TME ambient RNA is now modelled and subtracted. The claim that TME cells carry no malignant programs is tempered (§1.3, §2.5).
 4. **A4.** The axis is κ-based with protocol-specific controls, and intensity and prevalence are tumour-relative and informational. Oliveira 2025 profiles FFPE blocks and has no fresh-dissociated malignant cells, so it is no longer listed as a fresh-versus-fixed twin (§2.5, §6.4).
 5. **Stress.** Baron 2020 was mis-cited. Dissociation-induced expression is attributed to van den Brink 2017, O'Flanagan 2019 and Neuschulz 2023, and the novelty is restated as per-tumour attribution (§7).
 6. **Specificity claims.** §1.3 and §6.3 now report what the saved simulations show, including the new `specificity_fix_check.py`. The 72%/100% figures are a specificity failure of the κ > 0 estimand, not a type I error.
 7. **New nuisance axes.** Gene length / nuclear (intronic) fraction and transcript abundance / %ribo are added, on user-reported evidence (§1.1, §2.1, §2.5, §6.2).
-8. **Pilots, timeline and pre-registration.** The pilot schedule now spans months 0–6 (P4 and P5 possibly to month 9), with summed durations. P1-GO v1.0 and the filled-in decision config are registered on OSF at month 0, together with an audit/confirmation split of studies (§8, §9, §11).
+8. **Pilots, timeline and pre-registration.** The pilot schedule now spans months 0–6 (P4 and P5 possibly to month 9), with summed durations. P1-GO v1.1 and the filled-in decision config are registered on OSF at month 0, together with an audit/confirmation split of studies (§8, §9, §11).
 9. **Positioning and references.** Updated for starCAT, TCCA, ISOMERIC, cEBMF, DECIPHER, SIMVI, arXiv 2410.06451, the Gene Program Dictionary and scPFA, each with its verification status (§4, §12).
 10. **Implementation status.** Covers `mpaudit` (P1), the NMF tolerance finding and the R-parity harness (§8).
+11. **Rule implementation tightened (code review, 2026-10-17).** Criterion (b) counts only spillover-adjusted statistics that still hold with the ambient fraction ρ̂ scaled up by 1.5. The A4 nulls are recalibrated: a t prediction bound from replicate pairs of ≥3 distinct tumours, random-set κ changes carried to the MP's κ level, and a log 1.5 minimum effect. A dosage decoy hit needs no minimum number of decoys, as the frozen rule says. Labels and pre-declared exclusions are carried onto re-derived MPs by gene overlap, and the decision config is checked before any computation (§2.5, §8). Because these change the rule, its label moved from P1-GO v1.0 to **P1-GO v1.1**; v1.1 is what gets registered, and every mention below refers to it.
 
 Numbers from the toy simulator (`mpaudit.sim`) are labelled as toy results. They are true by construction and are not evidence about real tumours.
 
@@ -26,10 +27,10 @@ Numbers from the toy simulator (`mpaudit.sim`) are labelled as toy results. They
 ## 0. Bottom line
 
 - **Can it reach *Nature Methods*? Yes, but only if three conditions hold.**
-  1. Pilot P1 returns **GO** under the frozen rule **P1-GO v1.0** (§8; implemented in `src/mpaudit/report.py`). GO needs at least 3 *retained* 3CA MPs (not curated artefacts, not typed dosage) with nuisance support from at least one of:
+  1. Pilot P1 returns **GO** under the frozen rule **P1-GO v1.1** (§8; implemented in `src/mpaudit/report.py`). GO needs at least 3 *retained* 3CA MPs (not curated artefacts, not typed dosage) with nuisance support from at least one of:
      - a technical decoy arm (≥2 of ≥5 decoys, κ_retained ≥0.5);
-     - a positive, spillover-adjusted TME association above the q99 of matched random gene sets, for MPs not pre-declared as expected TME-shared;
-     - a κ loss beyond the null under a dissociation-free protocol in ≥50% of ≥4 paired tumours.
+     - a positive, spillover-adjusted TME association above the q99 of matched random gene sets that still holds with the ambient fraction ρ̂ scaled up by 1.5, for MPs not pre-declared as expected TME-shared;
+     - a κ loss beyond the null, and beyond 1.5-fold, under a dissociation-free protocol in ≥50% of ≥4 paired tumours.
 
      Rediscovering the 11 MPs already removed by hand does not count. Dosage or instability alone does not count either. If no criterion is adequately powered, the verdict is INCOMPLETE rather than GO or PIVOT.
   2. We secure a matched multi-protocol tumour cohort of **≥20 tumours**, either through a wet-lab partner or, less convincingly, by pooling public "twin" datasets.
@@ -64,7 +65,7 @@ Numbers from the toy simulator (`mpaudit.sim`) are labelled as toy results. They
   - order-invariant equivalence typing;
   - a new matched multi-protocol cohort with pre-registered predictions.
 - **Biggest risk.** Most canonical MPs (cycle, IFN, hypoxia, pEMT) may simply be real. The audit would then mostly confirm them, and the paper reads as "a more complex method reproduces known programs with q-values".
-  - Mitigation: pilot P1 is a hard go/no-go gate. Its rule (P1-GO v1.0, §8) is frozen and registered before any 3CA expression data are opened, and it can fail.
+  - Mitigation: pilot P1 is a hard go/no-go gate. Its rule (P1-GO v1.1, §8) is frozen and registered before any 3CA expression data are opened, and it can fail.
   - The flagship is built around results that are *quantitative per tumour*, not around overturning MPs: the ex vivo share of each MP in each tumour, selection versus induction, and malignant-intrinsic versus TME-shared.
 - **Resources.** About 4 FTE for about 26 months to submission; 2,000–4,000 GPU-hours; a wet-lab cohort costing about USD 300–450k at full scope (an estimate to be quoted), with a minimal version at about USD 150–200k.
 
@@ -237,7 +238,7 @@ Each axis returns an estimate with a 90% CI. The pre-registered margins below tu
 | **A1 Compartment sharing** (the within-sample negative control) | Two quantities: (i) κ of k's genes in co-resident T/NK, myeloid, fibroblast and endothelial cells, after removing TME identity programs; (ii) partial R² of the per-sample malignant score on the same gene set's **pseudo-bulk TME score after subtracting predicted malignant→TME ambient spillover** (see below), conditioned on cancer type with study random effects, against random gene sets matched on expression **and** malignant specificity | Upper CI of the TME/malignant κ ratio < 0.3 **and** upper CI of the adjusted partial R² below the matched-null q95 | Lower CI of the ratio > 0.6 **or** an adjusted partial R² above the matched-null q99 with a positive slope. There is no fixed R² bar (see below) |
 | **A2 Contamination/doublet** | Shapley share of κ_tk removed by the M_se and A_s terms, **together with** the cell-level association of k-activity with doublet score and ambient fraction | Share upper CI < 0.2 | Share lower CI > 0.5 **and** a positive doublet/ambient association. Loading similarity to TME cells alone is never enough, which protects mimicry programs such as pEMT, MES-like and MHC-II |
 | **A3 Genetic** | (a) dosage share: Shapley share of κ removed by **allele-anchored** D_cg; (b) clone η² of activity with a region-aware block permutation; (c) arm enrichment, with known positionally clustered biological programs as negative controls (EDC 1q21, KRT 12q13/17q21, MHC-II 6p21, histones 6p22, metallothioneins 16q13) | Dosage share upper CI < 0.2 (only where allele data exist) | Dosage share lower CI > 0.5 → "dosage-driven"; η² lower CI > 0.3 → "clone-linked". With expression-only CNA, only a "positional flag" is possible |
-| **A4 Protocol** | Paired, same-tumour **Δlog κ** between protocols, on the gene panel both protocols retain (panel retention ι_k ≥ 0.5). κ is a correlation, so gene-wise capture efficiency does not move it; this sidesteps InvarMP's κ-versus-δ identifiability problem. Null: same-protocol, multi-piece replicates (regional heterogeneity) where ≥3 pairs exist; otherwise random expression-matched gene sets in the same paired tumours. Δπ (prevalence) and Δm (intensity) use protocol-specific control genes from each protocol's malignant cells in the paired tumours; they are tumour-relative and informational (see below) | \|mean Δlog κ\| ≤ log 1.5 by two one-sided tests (TOST) | κ loss beyond the null with lower CI of loss > log 2 in fixed or in situ data → ex vivo; a tumour-relative Δπ with stable Δm → candidate selection (informational) |
+| **A4 Protocol** | Paired, same-tumour **Δlog κ** between protocols, on the gene panel both protocols retain (panel retention ι_k ≥ 0.5). κ is a correlation, so gene-wise capture efficiency does not move it; this sidesteps InvarMP's κ-versus-δ identifiability problem. Null: same-protocol, multi-piece replicates (regional heterogeneity) where pairs from ≥3 distinct tumours exist, as a one-sided 95% t prediction bound; otherwise random expression-matched gene sets in the same paired tumours, whose κ change is carried to the MP's κ level on the linear scale. Δπ (prevalence) and Δm (intensity) use protocol-specific control genes from each protocol's malignant cells in the paired tumours; they are tumour-relative and informational (see below) | \|mean Δlog κ\| ≤ log 1.5 by two one-sided tests (TOST) | κ loss beyond the null with lower CI of loss > log 2 in fixed or in situ data → ex vivo; a tumour-relative Δπ with stable Δm → candidate selection (informational) |
 | **A5 QC entanglement** | Correlation of activity with %mito, complexity, %ribo and per-cell intronic (nuclear) fraction; the program's median gene length and fraction of genes > 100 kb; Shapley share under QC terms | Reported only | Flag only; never used for deletion |
 
 **Malignant→TME spillover (A1).** As the review pointed out, a random-gene null cannot absorb spillover, because random genes are not malignant-specific. The within-sample κ ratio can be inflated in the same way. A1 therefore works in four steps:
@@ -251,7 +252,8 @@ Why subtraction rather than a covariate: on the toy, entering the spill score as
 Why there is no fixed R² bar: the null itself is high and depends on the design. On the toy, null q95 ranged from about 0.1 to 0.8 across cohort designs (details under P6, §8).
 
 Open problems:
-- Subtraction under-corrects if real ambient RNA under-represents the markers (ρ̂ biased low).
+- Subtraction under-corrects if real ambient RNA under-represents the markers (ρ̂ biased low), and the random-set null does not absorb the leftover leak, because random sets lack a real program's between-sample variation. P1 therefore re-runs A1 with every ρ̂ multiplied by 1.5 and counts an MP only if it stays above that run's null. This covers ρ̂ biased low by up to about a third. On a 16-sample toy with ρ̂ × 0.7, a malignant-only CNA program rose from 0.15 to 0.41 against q99 0.27, and fell to 0.11 against 0.23 in the re-run; stress and IFN stayed above both.
+- With fewer than 5 malignant-specific markers, the adjustment is skipped with a warning. This happens when ambient RNA exceeds about 1/8 in a TME type, because ambient RNA caps a marker's fold change at about 1/ρ, or when a TME type shares the malignant lineage genes (e.g. normal epithelium). Such MPs cannot count through P1's criterion (b).
 - The κ ratio (i) is not yet spillover-adjusted.
 
 **Capture and nulls (A4).** The choice of control genes matters:
@@ -260,8 +262,8 @@ Open problems:
 - So intensity and prevalence cannot see a cohort-wide loss; on the toy, stress intensity changed by about 0 while its κ collapsed. κ is the only A4 statistic for a cohort-wide loss.
 
 The nulls have their own limits:
-- The replicate null needs same-protocol region pairs, which public twins mostly lack.
-- The random-set fallback is wide for κ: only large losses pass, and it can collapse where random κ ≈ 0.
+- The replicate null needs same-protocol region pairs, which public twins mostly lack. It is a one-sided t prediction bound over the replicate changes of ≥3 distinct tumours: 5% false losses per tumour by Monte Carlo, against 13% for the empirical 95th percentile of 3 changes used before.
+- The random-set fallback holds additive κ changes shared by all genes, carried to the MP's κ level. It does not hold the MP's own sampling noise or regional heterogeneity, so it is narrow. A κ loss therefore also has to exceed log 1.5, the A4 equivalence margin. On the toy, the null alone gave 3 losses and 7 gains in 32 tumour tests of programs the protocol leaves alone; with the margin there were none.
 - For intensity, it does not cover piece-to-piece variation.
 
 The selection-versus-induction prediction (§7, result 3) needs a contrast that can see cohort-wide prevalence shifts. That is open.
@@ -519,7 +521,7 @@ Hypotheses to measure, not assume:
 
      Two further candidates, both unchecked, were found in October 2026: a GEM-X Flex performance preprint (bioRxiv 10.64898/2026.03.06.710062) and a Frontiers 2026 brief report on matched FFPE and frozen samples.
    - **Oliveira et al. (Nat Genet 2025) is not a fresh-versus-fixed twin.** Its Chromium Flex (8 FFPE blocks of tumour and normal tissue), Visium HD (5 patients) and Xenium (4 tumours) data all come from the same FFPE blocks, and we found no fresh-dissociated malignant cells in it. It is used only as a fixed-dissociated versus in situ panel comparison.
-   - Most public twins lack same-protocol replicate pieces, so their A4 null is the wider random-set null (§2.5).
+   - Most public twins lack same-protocol replicate pieces, so their A4 null is the random-set null, which misses regional heterogeneity; the log 1.5 minimum effect then governs (§2.5).
    - Primary endpoint: AUROC of the "ex vivo/protocol-sensitive" calls for predicting loss in fixed or in situ data from the same tumour, against a multi-region null.
    - Secondary endpoint: concordance of B1-typed MP usage across protocols.
 4. **Spatial.**
@@ -560,7 +562,7 @@ AUROC is reported with Hanley–McNeil CIs, against the trivial typer, with typi
 1. **A provenance card for every Gavish-41 and 3CA v2 malignant MP**, certified on studies *not* used to derive each list (for the lists derived from 3CA studies, this means TCCA, CELLxGENE sets, the new cohort and confirmation-half studies outside each list's derivation set). It reports r_L, lineage prevalence, type, Shapley shares, stability and core genes. Expectations:
    - cycle, IFN/MHC-II and hypoxia are B1 or B2;
    - LQ and contamination MPs are T;
-   - **the P1 go/no-go result:** under P1-GO v1.0 (§8), at least 3 retained, non-dosage MPs have nuisance support. The atlas then types them with the full evidence vector on the confirmation half.
+   - **the P1 go/no-go result:** under P1-GO v1.1 (§8), at least 3 retained, non-dosage MPs have nuisance support. The atlas then types them with the full evidence vector on the confirmation half.
 2. **Per-tumour decomposition of "stress"**, the most contested MP. This is quantitative and non-obvious, but neither the existence of dissociation stress nor its protocol dependence is new:
    - van den Brink et al. (2017) showed dissociation-induced expression in a subpopulation of muscle stem cells.
    - O'Flanagan et al. (2019) compared cold-protease (6 °C) with collagenase (37 °C) dissociation in patient tumours, breast-cancer PDXs and cell lines (155,165 cells), and defined a 512-gene collagenase-associated stress core including FOS and JUN.
@@ -598,7 +600,7 @@ The pilots were first squeezed into months 0–3. Their durations sum to **18 pe
 | Pilot | Starts | Duration | Decision criterion |
 |---|---|---|---|
 | **P0 Data and design census** | Month 0. Metadata only until the OSF registration | 2 weeks | GO if ≥1,000 tumours with raw UMIs **and** TME cells across ≥8 types, and ≥15% of candidate MPs are used by tumours that bridge ≥2 protocol levels. Also count: empty droplets; BAM access (submit DAC applications in week 1); TCCA overlap, from GEO accessions; the cohort × lineage × protocol rank; and whether each half of the study split keeps P1's powered minimum (≥4 paired tumours, ≥10 samples with TME cells). The MP-usage count for the bridge share runs after registration, on the audit half. If the bridge share is <15%, A4 depends on the new cohort, so a wet-lab partner becomes mandatory. |
-| **P1 Audit of the standard against real nuisance** (key gate) | Month 0–1, after registration. Runs now with `mpaudit` | 4 weeks, plus NMF compute | Audit of 3CA MPs on the audit half: decoy arms, A1 TME co-variation and A4 protocol κ in public twins; instability and positional flags outside the dosage rule are informational. The decision follows **P1-GO v1.0** (below): GO, PIVOT or INCOMPLETE. **PIVOT**: re-centre on calibrated membership, gene tiers and projection, and change venue (Genome Biology / NAR GAB). **INCOMPLETE**: close the data gap that left every criterion unpowered and rerun under the same frozen rule. |
+| **P1 Audit of the standard against real nuisance** (key gate) | Month 0–1, after registration. Runs now with `mpaudit` | 4 weeks, plus NMF compute | Audit of 3CA MPs on the audit half: decoy arms, A1 TME co-variation and A4 protocol κ in public twins; instability and positional flags outside the dosage rule are informational. The decision follows **P1-GO v1.1** (below): GO, PIVOT or INCOMPLETE. **PIVOT**: re-centre on calibrated membership, gene tiers and projection, and change venue (Genome Biology / NAR GAB). **INCOMPLETE**: close the data gap that left every criterion unpowered and rerun under the same frozen rule. |
 | **P2 Specificity and depth invariance of κ** | Months 3–6. Needs κ cross-fitting (`tessera.certify`) and Sim-I v0, neither built | 3 weeks | Overlap leakage ≤5% at 10–25% shared genes with an *estimated* dictionary (the toy check used a perfect one, §1.3); membership slope ≤0.05 per decade; power ≥0.8 for G2/M and hypoxia in tumours with ≥200 cells. Otherwise revise the null band or margins. |
 | **P3 Cross-fitting calibration** | Months 3–6. Needs Sim-I nulls | 2 weeks | Type I in [0.03, 0.07] under non-NB marginals on Sim-I nulls; gene FDR ≤0.07 at nominal 0.05. |
 | **P4 Typing beats trivial** | About month 6. Needs ≥40 labelled artefacts and the evidence-vector typer | 1 week | Evidence-vector AUROC exceeds the trivial typer by ≥0.05 on the expanded labelled set. Otherwise typing is demoted from the headline. Only 11 labels exist now (the 3CA v2 `inds_rm` MPs), and `mpaudit` has only the trivial typer. |
@@ -607,24 +609,25 @@ The pilots were first squeezed into months 0–3. Their durations sum to **18 pe
 | **P7 Engine prototype and scaling** | Month 3 onward | 6 weeks (overlaps) | Matched cosine for subset-shared programs ≥ GBCD + 0.05; a 3CA-v1-scale fit in ≤24 GPU-hours. Otherwise the default engine is TESSERA-wrapped cNMF, with the headline unchanged. |
 | **P8 Scoop check** | Month 0 | 1 week, then every 2 weeks | Landscape §6.3 search terms plus: "cross-fitted gene program", "metaprogram provenance", "protocol-invariant program", "decoy metaprogram", and papers citing GBCD, TCAT, Gavish, O'Flanagan, Neuschulz and Marsh. Identify the 2026 dissociated-versus-intact tumour preprint seen only as a snippet, and read scPFA. NO-GO only if a preprint already types recurrent MPs against within-sample negative controls. A search in October 2026 (about 14 web searches, without bioRxiv full-text or PubMed access) found none; this is weak evidence. |
 
-**P1-GO v1.0** (frozen 2026-10-16). It is implemented in `src/mpaudit/report.py`, which is the single source of truth; [05_pilot_P1.md](05_pilot_P1.md) states the same rule.
-- **Unit.** *Retained* MPs are audited MPs not labelled as curated artefacts (`typer.labels` = 1; e.g. the 11 MPs removed by hand in 3CA v2). Rediscovering curated artefacts is not news.
+**P1-GO v1.1** (frozen 2026-10-17). It is implemented in `src/mpaudit/report.py`, which is the single source of truth; [05_pilot_P1.md](05_pilot_P1.md) states the same rule. v1.1 is P1-GO v1.0 (2026-10-16) plus three requirements added by the code review before any real data were opened: the ρ̂ × 1.5 condition in (b), the log 1.5 κ margin in (c), and the ≥3 distinct-tumour t prediction bound for the replicate null in (c). No cohort has been run under either version; v1.1 is the version to register.
+- **Unit.** *Retained* MPs are audited MPs not labelled as curated artefacts (`typer.labels` = 1; e.g. the 11 MPs removed by hand in 3CA v2). Rediscovering curated artefacts is not news. Re-derived MPs inherit the label of their best-matching labelled MP (`typer.labelled_gmt`, Jaccard ≥0.3).
 - **Pre-declared exclusions.** These are written into the config's `decision` block and registered before any 3CA expression data are opened.
-  - *Expected TME-shared biology.* An MP is excluded here if it is named on `expected_tme_shared` or overlaps a pre-declared gene set (`expected_tme_shared_gmt`) by ≥10 genes. This disables criterion (b) only; such an MP can still count through (a) or (c).
-  - *Dosage.* An MP is typed dosage if its genes are arm-enriched (BH q < 0.05 after excluding known positional gene clusters), or if a dosage decoy arm (CNA clone) recruits it under the thresholds of (a). Dosage MPs are labelled and never counted: they are genetic, not technical nuisance.
+  - *Expected TME-shared biology.* An MP is excluded here if it is named on `expected_tme_shared` or overlaps a pre-declared gene set (`expected_tme_shared_gmt`) by ≥10 genes. This disables criterion (b) only; such an MP can still count through (a) or (c). Names work only when published MPs are audited; re-derived MPs are named by the run, so for them the list must be gene sets.
+  - *Dosage.* An MP is typed dosage if its genes are arm-enriched (BH q < 0.05 after excluding known positional gene clusters), or if a dosage decoy arm (CNA clone) recruits it (≥2 hits and κ_retained ≥0.5, whatever the number of decoys). Dosage MPs are labelled and never counted: they are genetic, not technical nuisance.
 - **Nuisance support**, any of:
   - (a) *technical decoys*: in a technical decoy arm, ≥2 of ≥5 decoys recruit the MP (Jaccard ≥0.3), and the decoys keep κ_retained ≥0.5 of its within-sample co-expression;
-  - (b) *TME co-variation (A1)*: a positive slope and a spillover-adjusted partial R² above the q99 of random gene sets matched on expression and malignant specificity, in ≥10 samples with TME cells, for an MP not on the expected-TME-shared list. There is no fixed R² threshold;
-  - (c) *protocol (A4)*: a one-sided κ loss beyond the null under the dissociation-free protocol, in ≥50% of ≥4 paired tumours.
+  - (b) *TME co-variation (A1)*: a positive slope and a spillover-adjusted partial R² above the q99 of random gene sets matched on expression and malignant specificity, in ≥10 samples with TME cells, for an MP not on the expected-TME-shared list. The statistic must actually be adjusted (not the unadjusted fallback used when markers are too few), and the association must hold again (positive slope, partial R² above that run's q99) with every ambient fraction ρ̂ multiplied by 1.5. There is no fixed R² threshold;
+  - (c) *protocol (A4)*: a one-sided κ loss under the dissociation-free protocol in ≥50% of ≥4 paired tumours. A tumour counts as a loss when Δlog κ is below the null bound and below −log 1.5. The null is a one-sided 95% t prediction bound from same-protocol replicate pairs of ≥3 distinct tumours, otherwise matched random gene sets carried to the MP's κ level.
 - **Verdict.**
   - GO if ≥3 retained, non-dosage MPs have nuisance support.
-  - INCOMPLETE if no criterion is adequately powered. Powered means ≥5 decoys in a technical arm for (a), ≥10 samples with TME cells for (b) and ≥4 paired tumours for (c).
+  - INCOMPLETE if no criterion is adequately powered. Powered means ≥5 decoys in a technical arm for (a), ≥10 samples with TME cells (with a null and the spillover adjustment) for (b) and ≥4 paired tumours for (c).
   - Otherwise PIVOT.
 - **Informational only.** Instability is informational; method variants such as "uncentred" are reported separately. So are positional flags outside the dosage rule and the trivial typer.
+- **Config check.** Before any computation, `mpaudit` refuses a decision block with unknown or pre-v1.0 keys, decoy arms that neither arm list names, and expected-TME-shared names for re-derived MPs.
 - **What the audit runs through.** Decoys run through the Python port (`mpaudit.gavish`), not the original R code. R-versus-port parity is untested: the harness is in `scripts/parity`, but its R side has not been executed, because R could not be installed in the build environment. The planned Sim-I backbone cross-check of the decoys does not exist yet, because Sim-I is not built.
 
 **Pre-registration and study split (month 0).** Before any 3CA expression data are opened, we register on OSF:
-- P1-GO v1.0;
+- P1-GO v1.1;
 - the filled-in `decision` config:
   - the expected-TME-shared list, planned as IFN/MHC-II response and hypoxia and fixed at registration;
   - the technical decoy arm: doublet score, ambient/contamination estimate, %ribo and intronic fraction;
@@ -653,10 +656,10 @@ P4 and P5 can demote typing or A3 from the headline, but they do not stop the pr
 - κ-based A4 with protocol-specific controls (`protocol.py`);
 - instability and positional arm enrichment;
 - a trivial typer with gene-length, %ribo and intronic features (`typer.py`);
-- the P1-GO v1.0 decision (`report.py`).
+- the P1-GO v1.1 decision (`report.py`).
 
 Findings and state:
-- **NMF tolerance.** The port now defaults to tol = 1e-7, because at 1e-5 the top-50 lists were not converged. Toy result: we continued the same trajectory to tol 1e-8. Against that reference, a program kept a median of 44 of its top 50 genes at 1e-5, 48 at 1e-6 and 49 at 1e-7. Tol 1e-7 costs about 3× the NMF time of 1e-5. The iteration cap, raised to 5,000, never bound. R's own stopping rule, applied to the same iterates, would stop after a median of about 920 iterations, about 5× later than tol 1e-5.
+- **NMF tolerance.** The port now defaults to tol = 1e-7, because at 1e-5 the top-50 lists were not converged. Toy result: we continued the same trajectory to tol 1e-8. Against that reference, a program kept a median of 44 of its top 50 genes at 1e-5, 48 at 1e-6 and 49 at 1e-7. Tol 1e-7 costs about 3× the NMF time of 1e-5. R-parity runs use `gavish.tol: 1.0e-8` (written with a decimal point, so YAML reads a number). The iteration cap, raised to 5,000, never bound. R's own stopping rule, applied to the same iterates, would stop after a median of about 920 iterations, about 5× later than tol 1e-5.
 - **R parity.** `scripts/parity` holds three steps:
   1. export the exact NMF input;
   2. `run_r_snmf.R` calls `NMF::nmf(method = "snmf/r")`;
@@ -664,8 +667,8 @@ Findings and state:
 
   The Python side is tested; the R side has never been run, and there are no parity numbers yet. Until parity passes on 3–5 real samples (months 0–1), absolute numbers from the port (MP count, MP genes, decoy recruitment) are not 3CA-equivalent.
 - **Toy behaviour of each axis** (`mpaudit.sim`; true by construction, not evidence about tumours):
-  - *A1.* After spillover subtraction, only stress and IFN are above the null q99 (values under P6; IFN 0.94 vs 0.82). The leak is largely removed: CNA_7q goes from 0.60 unadjusted to 0.07, and hypoxia from 0.23 to 0.00. IFN can only be excluded by the expected-TME-shared list.
-  - *A4.* Stress loses κ in 4 of 4 paired tumours (κ about 0.70 fresh vs 0.05 fixed). Cycle, hypoxia, IFN, EMT, CNA and contamination show no κ loss. There was one false loss in 36 tests.
+  - *A1.* After spillover subtraction, only stress and IFN are above the null q99 (values under P6; IFN 0.94 vs 0.82). The leak is largely removed: CNA_7q goes from 0.60 unadjusted to 0.07, and hypoxia from 0.23 to 0.00. IFN can only be excluded by the expected-TME-shared list. On a 16-sample fresh toy, stress and IFN also stay above the null of the ρ̂ × 1.5 re-run (0.96 vs 0.34 and 0.84 vs 0.36), while CNA, hypoxia and cycle have negative slopes there.
+  - *A4.* Stress loses κ in 4 of 4 paired tumours (κ about 0.70 fresh vs 0.05 fixed). None of the other eight planted sets (cycle, hypoxia, IFN, EMT, CNA, contamination, abundance, long genes) loses κ in any of the 32 tumour tests; the earlier log-scale random-set null had flagged abundance once.
   - *Decoys.* The technical arm (estimated contamination and doublet score) keeps κ_retained 1.27–1.31 of the contamination set and ≤0.04 of cycle and CNA. The value above 1 arises because the covariate is built partly from the set's own genes (19 of the covariate's 35 marker genes are in the set). The dosage arm (estimated clone) keeps 0.84–0.88 of CNA and about 0 of the others.
   - *Typer.* For the abundance set, \|r\| with %ribo is 0.90–0.91 (next highest ≤0.17). The long-gene set has a median gene length of 351–454 kb and \|r\| with intronic fraction of 0.62–0.65 (others ≤0.08).
 - **Not built.** Sim-I, κ cross-fitting and the certification layer, the evidence-vector typer, allele-aware dosage (only an expression-only positional flag exists) and the TESSERA engine.
@@ -681,7 +684,7 @@ Findings and state:
 
 | Months | Milestone |
 |---|---|
-| 0 | **OSF pre-registration 1**: P1-GO v1.0, the filled-in decision config, the audit/confirmation study split; DAC applications; P0 metadata census |
+| 0 | **OSF pre-registration 1**: P1-GO v1.1, the filled-in decision config, the audit/confirmation study split; DAC applications; P0 metadata census |
 | 0–3 | P0, P1 (`mpaudit`, audit half), P6, P8; R-versus-port parity on 3–5 real samples (`scripts/parity`); IRB approval and wet-lab protocol optimisation |
 | 3–6 | κ cross-fitting and Sim-I v0, then P2 and P3; P7 starts; P4 once ≥40 labels and the evidence-vector typer exist; P5 when BAM access arrives (possibly to M9) |
 | 3–9 | v0.1: split, certify, genes, audit mode, decoy audit; Sim-I/Sim-R v1; **audit manuscript (audit half) ready internally at M10** |
@@ -745,7 +748,7 @@ The submission target is unchanged, because the prerequisites of P2–P5 (cross-
 | 14 | Transport κ absorbs the dissociation artefact through responsive TME calibrators; κ vs δ not identified for malignant-only genes (InvarMP F1/F3) | No gene-wise transport is used for invariance tests. κ (a correlation) is invariant to gene-wise capture efficiency. TME cells serve as *negative controls* (A1), not as calibrators, and their responsiveness is the signal being measured. |
 | 15 | e-values invalid or powerless; e-BH arithmetic (InvarMP F3) | No universal-inference e-values. The saved referee runs show why: the e-value as specified stayed valid but did not detect a 1.65-fold shift, and the plug-in variant that has power fired under the null whenever gene-wise capture was misestimated ([referee_checks](referee_checks/README.md)). Paired tumour-level tests on a small, pre-registered hypothesis family (≤10–30 MP × axis pairs) with a stated power. |
 | 16 | Pan-cancer invariance claim untestable on public data (InvarMP F2/F4) | The headline is restricted to bridged axes plus the new cohort. Elsewhere the label is "U-no-bridge", reported honestly in the design-graph report. |
-| 17 | Thinning null twins understate the real null (regional ITH) (InvarMP rigor) | The protocol null comes from same-protocol multi-region pieces (8 tumours) plus public multi-region data. Where replicates are missing, the null is random matched gene sets in the same tumours, which is wide for κ and ignores piece-to-piece variation; this is reported as the weaker null. |
+| 17 | Thinning null twins understate the real null (regional ITH) (InvarMP rigor) | The protocol null comes from same-protocol multi-region pieces (8 tumours) plus public multi-region data. Where replicates are missing, the null is random matched gene sets in the same tumours, which ignores piece-to-piece variation and the MP's own sampling noise, so a κ loss must also exceed log 1.5; this is reported as the weaker null. |
 | 18 | QC covariates are post-treatment and absorb biology (CERT-MP novelty) | QC is never an offset. It is a reported A5 axis with Shapley share. |
 | 19 | Doublet prior cannot represent misclassified whole TME cells; mimicry programs mis-typed (CREDO rigor; CERT-MP) | Unconstrained usage of TME components. A2 requires a cell-level doublet or ambient association, not loading similarity. Planted mimicry tests in Sim-R. |
 | 20 | Underpowered validation (11-positive AUROC; n ≈ 6 matched tumours) | ≥40 labelled artefacts with CIs and a trivial baseline; matched cohort n = 24 with a power calculation; non-canonical Tahoe endpoints. |
@@ -755,8 +758,8 @@ The submission target is unchanged, because the prerequisites of P2–P5 (cross-
 | 24 | The flagship confirms known biology | P1 gate; flagship built on per-tumour quantitative provenance and non-obvious selection/induction predictions. |
 | 25 | Wet-lab cohort fails (accrual, cost) | Minimal cohort of 12 tumours; PDX substitute; public twins; a computational-only claim limited to bridged axes. |
 | 26 | Scoop | Engine-agnostic claim; tripwire preprint at M10; fortnightly monitoring. |
-| 27 | The P1 gate could pass on almost any cohort: expected biology and CNA MPs counted, one decoy enough, fixed R² below the null, three versions of the rule (review 2026-10-16) | One frozen rule, P1-GO v1.0 (§8), registered at M0: expected-TME-shared MPs cannot count via A1; dosage MPs are never counted; ≥2 hits among ≥5 decoys with κ_retained ≥0.5; A1 above the matched-null q99; INCOMPLETE when unpowered. |
-| 28 | Malignant→TME ambient spillover makes malignant programs look TME-shared (review 2026-10-16) | Predicted spillover (ρ̂ from malignant-specific markers) is subtracted from pseudo-bulk TME scores, with an expression- plus specificity-matched null. The κ ratio is not yet adjusted; this is stated as open. |
+| 27 | The P1 gate could pass on almost any cohort: expected biology and CNA MPs counted, one decoy enough, fixed R² below the null, three versions of the rule (review 2026-10-16) | One frozen rule, P1-GO v1.1 (§8), registered at M0: expected-TME-shared MPs cannot count via A1; dosage MPs are never counted; ≥2 hits among ≥5 decoys with κ_retained ≥0.5; A1 above the matched-null q99, spillover-adjusted and robust to ρ̂ × 1.5; INCOMPLETE when unpowered; the decision config checked before any run. |
+| 28 | Malignant→TME ambient spillover makes malignant programs look TME-shared (review 2026-10-16) | Predicted spillover (ρ̂ from malignant-specific markers) is subtracted from pseudo-bulk TME scores, with an expression- plus specificity-matched null. P1 counts A1 only where the adjustment ran and survives ρ̂ × 1.5. The κ ratio is not yet adjusted; this is stated as open. |
 | 29 | The audit and the pre-registered analyses reuse the same 3CA data (review 2026-10-16) | Studies are split at M0 into audit and confirmation halves. P1 and the audit paper use the audit half only, and pre-registration 2 is tested on the confirmation half, TCCA and the new cohort. |
 | 30 | Decoy results describe the Python port, not the R pipeline; parity untested | R-versus-port parity on 3–5 real samples (`scripts/parity`) before P1 numbers are quoted as 3CA-equivalent; NMF tolerance tightened to 1e-7. |
 
@@ -780,7 +783,7 @@ The submission target is unchanged, because the prerequisites of P2–P5 (cross-
    - Decide whether to approach the GBCD or Tirosh groups as collaborators, which lowers scoop risk but shares credit.
 6. **Scope of the between-tumour module.** Ship it as an optional, limited-claim module (recommended), or omit it.
 7. **Pre-registration on OSF, in two steps.**
-   - At M0, before any 3CA expression data are opened, register P1-GO v1.0, the filled-in decision config (the expected-TME-shared list and the decoy arms) and the audit/confirmation study split.
+   - At M0, before any 3CA expression data are opened, register P1-GO v1.1, the filled-in decision config (the expected-TME-shared list and the decoy arms) and the audit/confirmation study split.
    - At M14, register the TESSERA defaults, margins, type rules and endpoints, to be tested on the held-out confirmation studies.
 
    Recommended: it constrains the analysis, but it is the best defence against cherry-picking critiques. The user must approve the expected-TME-shared list before M0.

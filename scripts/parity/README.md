@@ -27,8 +27,9 @@ Requirements: the mpaudit environment (Python) and R >= 3.6 with `install.packag
 (if NMF's installation asks for Bioconductor's Biobase: `BiocManager::install("Biobase")`).
 
 ```bash
-# 1. Export the 5 samples with most NMF cells (or --samples S1 S2 S3), using the 'mpaudit p1' config.
-python scripts/parity/export_matrices.py cohort.h5ad --config configs/p1_3ca_example.yaml \
+# 1. Export the 5 samples with most NMF cells (or --samples S1 S2 S3), using a copy of the
+#    'mpaudit p1' config with the parity tolerance, gavish.tol: 1.0e-8 (see "Config" below).
+python scripts/parity/export_matrices.py cohort.h5ad --config parity_config.yaml \
     --out parity/export --n 5
 
 # 2. R. Smoke test first (one sample, one rank, one run) to time it and catch setup problems:
@@ -53,16 +54,33 @@ to re-run the comparison without refitting. `run_r_snmf.R` skips samples that al
 
 Sample choice: the largest samples give the most stable programs and are what matters for an
 atlas, but they are also the slowest; 3-5 samples from different studies are enough for the
-program level. Use the same config as the audit (the export records it; `min_genes_per_cell`,
-`n_universe`, ranks and nrun all change the matrix or the fits).
+program level.
+
+Config: use the audit's config (the export records it; `min_genes_per_cell`, `n_universe`, ranks
+and nrun all change the matrix or the fits) with one change, the parity tolerance:
+
+```yaml
+gavish:
+  tol: 1.0e-8     # parity runs; the audit default is 1.0e-7
+```
+
+Write it with a decimal point: PyYAML reads `1e-8` as a string (mpaudit converts it, but other
+tools reading the config may not). The port's default, 1e-7, keeps a median 49 of the top 50 genes
+of a 1e-8 fit on the toy cohort (see `mpaudit/nmf.py`); parity is checked one step tighter so that
+a FAIL is not just the port stopping early. `export_matrices.py` and the report flag an export
+with a looser `tol`. R ignores `tol` and `max_iter` (it has its own stopping rule), so changing
+them needs a re-export and a new `compare.py` run, but not a new R run: the matrices are the same.
 
 ## Expected runtime
 
 - Export: about 10 s and 100 MB (gzipped) per 7,000 x 3,000 sample here (7.9 million non-zero
   entries written in 7.4 s), plus reading the .h5ad.
 - Port: one sNMF/R run on a 7,000 x 2,000 matrix took 6-8 s on one core here (115-135 iterations at
-  ~50 ms each, `tol=1e-5`), so ranks 4-9 x nrun 10 is roughly 5-15 min per sample per core;
-  `--n-jobs` parallelises over samples. A replicate doubles it. Lowering `tol` multiplies it.
+  ~50 ms each), measured at the former default `tol=1e-5`. Lowering `tol` multiplies the
+  iterations: on the toy cohort fits ran a median 2.4x as many iterations at 1e-7 and 3.1x at 1e-8
+  as at 1e-5 (`mpaudit/nmf.py` quotes about 3x for 1e-7). Ranks 4-9 x nrun 10 is therefore roughly
+  15-45 min per sample per core at the audit default (1e-7) and 20-60 min at the parity setting
+  (1e-8); `--n-jobs` parallelises over samples. A replicate doubles it.
 - R: not measured (R unavailable here). R's snmf/r solves exact NNLS problems at each iteration
   and its stopping rule ran ~900 iterations when applied to the port's iterates on the toy cohort
   (see `mpaudit/nmf.py`), so expect it to be several times slower than the port per run: plan for
@@ -100,8 +118,10 @@ Verdict:
 | INVALID | R did not read the exported matrix, or a side's genes differ from the export | nothing else in the report is meaningful; re-export with the current code |
 
 On a FAIL, look at the profile objectives. If the port's basis fits worse at most sample-ranks
-(`py_vs_r_pct` > 0), however small the difference, the port stops short of R: lower `tol` (e.g.
-1e-7) or raise `max_iter` in the config, re-export and compare again. If the signs are mixed, the
+(`py_vs_r_pct` > 0), however small the difference, the port stops short of R: lower `gavish.tol`
+further (e.g. `1.0e-9`; first check that the export used the parity setting `1.0e-8`, which the
+report's Inputs list shows) or raise `max_iter` if fits reach it, re-export and compare again (the
+R output can be reused). If the signs are mixed, the
 two solvers reach different but equally good optima (NMF is not identifiable); robust-program and
 MP agreement then say whether MP-level conclusions survive the solver change, and absolute counts
 must not be quoted as 3CA-equivalent.

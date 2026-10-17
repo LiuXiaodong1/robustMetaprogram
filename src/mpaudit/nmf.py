@@ -7,7 +7,9 @@ Mirrors ``NMF::nmf(method = "snmf/r")`` (renozao/NMF, ``R/algorithms-snmf.R``):
   ``beta = 0.01`` and ``eta = max(A)`` (R squares ``eta`` in the W step);
 * initialises ``W`` uniformly at random with unit-norm columns and starts with the H step;
 * restarts from a new random ``W`` whenever a row of ``H`` is all zero (at most 10 restarts);
-  iterations are counted across restarts, as in R;
+  iterations are counted across restarts, as in R. A fit that reaches the restart limit stops
+  with a warning, as in R, and is unusable (its last ``H`` has an all-zero row); ``return_info``
+  flags it as ``failed``, and :mod:`mpaudit.gavish` counts such runs (``n_failed_fits``);
 * reports R's ``.snmf.objective`` (``0.5 * (resid + eta ||W||^2 + beta sum colSums(H)^2)``,
   with ``eta`` unsquared), which is what picks the best of ``nrun`` restarts.
 
@@ -27,8 +29,10 @@ the cap, yet their top-50 genes kept moving: continued on the same trajectory to
 a program kept a median of 44 of its top 50 genes (48 at ``tol=1e-6``, 49 at ``1e-7``, at about
 2x and 3x the runtime). R's rule, applied to the same HALS iterates, stopped after a median of
 about 900 iterations. :class:`mpaudit.gavish.GavishParams` therefore defaults to ``tol=1e-7``
-(about 3x the runtime of 1e-5); use 1e-8 for parity runs against the R code. ``snmf_r`` itself
-keeps 1e-5 as its low-level default.
+(about 3x the runtime of 1e-5). Parity runs against the R code (``scripts/parity``) use
+``tol=1e-8``, i.e. ``gavish.tol: 1.0e-8`` in the config (YAML reads ``1e-8`` without a decimal
+point as a string; :class:`~mpaudit.gavish.GavishParams` converts it, but other tools may not).
+``snmf_r`` itself keeps 1e-5 as its low-level default.
 """
 from __future__ import annotations
 
@@ -57,9 +61,11 @@ def snmf_r(
 ) -> tuple[np.ndarray, np.ndarray, float] | tuple[np.ndarray, np.ndarray, float, dict]:
     """Fit one sNMF/R factorisation. Returns ``(W, H, r_objective)``.
 
-    With ``return_info`` a fourth element is returned: ``{"n_iter", "converged", "restarts"}``.
-    ``n_iter`` counts iterations across restarts; ``converged`` is true only when the tolerance
-    test stopped the fit (not ``max_iter`` or the restart limit).
+    With ``return_info`` a fourth element is returned: ``{"n_iter", "converged", "restarts",
+    "failed"}``. ``n_iter`` counts iterations across restarts; ``converged`` is true only when the
+    tolerance test stopped the fit (not ``max_iter`` or the restart limit); ``failed`` is true when
+    the restart limit stopped it (``max_restarts`` all-zero rows of ``H``; the returned factors are
+    then not a usable fit).
     """
     A = np.asarray(A, dtype=np.float64)
     if A.ndim != 2 or (A < 0).any():
@@ -75,7 +81,7 @@ def snmf_r(
     H = np.zeros((k, n))
     prev = np.inf
     restarts = 0
-    converged = False
+    converged = failed = False
     it = 0
     while it < max_iter:
         it += 1
@@ -87,6 +93,7 @@ def snmf_r(
             restarts += 1
             if restarts >= max_restarts:
                 warnings.warn("snmf_r: too many restarts (zero rows in H); stopping", RuntimeWarning)
+                failed = True
                 break
             W, H, prev = _init_W(m, k, rng), np.zeros((k, n)), np.inf
             continue
@@ -106,7 +113,7 @@ def snmf_r(
     resid = float(np.sum((A - W @ H) ** 2))
     r_obj = 0.5 * (resid + eta * float(np.sum(W * W)) + beta * float(np.sum(H.sum(axis=0) ** 2)))
     if return_info:
-        return W, H, r_obj, {"n_iter": it, "converged": converged, "restarts": restarts}
+        return W, H, r_obj, {"n_iter": it, "converged": converged, "restarts": restarts, "failed": failed}
     return W, H, r_obj
 
 

@@ -27,8 +27,9 @@ from mpaudit.sim import simulate_cohort
 KEYS = dict(sample="sample", malignant="malignant", tumour="tumour", study="study", cancer_type="cancer_type",
             cell_type="cell_type", protocol="protocol", clone="clone_est", doublet="doublet_est",
             intronic="intronic_fraction")
-FLAG_COLS = ["tech_decoy_hits", "tech_kappa_retained", "dosage_decoy_hits", "partial_r2", "null_q99", "slope",
-             "partial_r2_unadjusted", "n_paired_tumours", "frac_loss_beyond_null_kappa", "positional_arm",
+FLAG_COLS = ["tech_decoy_hits", "tech_kappa_retained", "dosage_decoy_hits", "spill_adjusted", "partial_r2", "null_q99",
+             "slope", "partial_r2_rho", "null_q99_rho", "rho_sensitivity", "partial_r2_unadjusted", "n_paired_tumours",
+             "frac_loss_beyond_null_kappa", "positional_arm", "positional_arm_excluding_known",
              "q_excluding_known_clusters", "recovery_all", "expected_tme_shared", "dosage",
              "crit_a_tech_decoy", "crit_b_tme", "crit_c_protocol", "counted"]
 
@@ -53,7 +54,8 @@ def main():
                                    "dosage": ["clone_est"]}},
         "positional": {"cytoband": truth["cytoband"]},
         "protocol": {"reference": "fresh", "test": "fixed"},
-        # pre-declared before the run: IFN is expected to co-vary with TME cells while being real
+        # pre-declared before the run: IFN is expected to co-vary with TME cells while being real. The MPs
+        # are re-derived (named MP1, MP2, ... by the run), so the exclusion is a gene set, not a name.
         "decision": {"expected_tme_shared_sets": {"IFN": truth["sets"]["IFN"]}},
     }
     res = run_p1(adata, cfg, args.out)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def main(argv=None) -> None:
 
     p1 = sub.add_parser("p1", help="run the P1 audit on an .h5ad cohort")
     p1.add_argument("h5ad")
-    p1.add_argument("--config", help="YAML or JSON config (see configs/p1_example.yaml)")
+    p1.add_argument("--config", help="YAML or JSON config (see configs/p1_3ca_example.yaml)")
     p1.add_argument("--out", default="results/p1")
     p1.add_argument("--n-jobs", type=int)
 
@@ -35,10 +36,14 @@ def main(argv=None) -> None:
     import anndata as ad
 
     if args.cmd == "p1":
-        from .pipeline import run_p1
+        from .pipeline import merge_config, run_p1, validate_config
         cfg = _load_config(args.config)
         if args.n_jobs:
             cfg["n_jobs"] = args.n_jobs
+        try:  # fail on a bad config before reading the cohort; run_p1 checks again against its obs columns
+            validate_config(merge_config(copy.deepcopy(cfg)), log=lambda *a: None)
+        except ValueError as e:
+            ap.error(f"config {args.config}: {e}")
         run_p1(ad.read_h5ad(args.h5ad), cfg, args.out)
     elif args.cmd == "simulate":
         from .sim import simulate_cohort

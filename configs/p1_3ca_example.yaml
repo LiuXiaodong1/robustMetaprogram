@@ -1,6 +1,9 @@
 # Example P1 configuration for a 3CA-style cohort (adapt column names to your AnnData).
 # Run:  mpaudit p1 cohort.h5ad --config configs/p1_3ca_example.yaml --out results/p1 --n-jobs 8
 # Fill in the `decision` block (pre-declared lists) and freeze this file BEFORE running on real data.
+# The whole file is checked before any NMF runs (unknown or pre-v1.0 decision keys, decoy arms not named in
+# the rule, names that cannot match re-derived MPs, missing files): `mpaudit p1` stops with the reason.
+# Write floats with a decimal point (1.0e-8, not 1e-8): YAML reads 1e-8 as a string.
 keys:
   sample: sample            # NMF unit (one tumour sample)
   malignant: cell_type      # column marking malignant cells...
@@ -15,7 +18,8 @@ keys:
   intronic: intronic_fraction  # optional: per-cell intronic/unspliced fraction (STARsolo/velocyto)
 counts_layer: counts        # raw integer UMI counts (null = adata.X)
 recurrence_key: patient     # a tumour must not "recur" with its own second sample
-mps: rederive               # or a GMT of published MPs, e.g. the Gavish 2023 / 3CA v2 lists
+mps: rederive               # or a GMT of published MPs, e.g. the Gavish 2023 / 3CA v2 lists. Re-derived MPs are
+                            # named MP1, MP2, ... by the run: pre-declare their exclusions as gene sets
 n_jobs: 8
 cache_dir: nmf_cache        # NMF fits are reused across perturbations and re-runs
 qc:
@@ -33,7 +37,7 @@ gavish:                     # 3CA defaults; listed here to make the audited sett
   min_studies_per_mp: 2
   v2_gene_order: true       # 3CA v2 orders MP genes by study-deduplicated frequency
   min_genes_per_cell: 1000  # low-complexity cell filter used across 3CA scripts
-  tol: 1.0e-7               # 1e-5 leaves top-50 lists unconverged; use 1e-8 for R parity runs
+  tol: 1.0e-7               # 1.0e-5 leaves top-50 lists unconverged; use 1.0e-8 for R parity runs (scripts/parity)
 
 instability:
   enabled: true
@@ -46,7 +50,8 @@ decoy:
   enabled: true
   n: 5                      # the rule needs >= 2 hits among >= 5 decoys per arm
   method: residual
-  arms:                     # categorical columns -> permutation strata; continuous -> mean model
+  arms:                     # categorical columns -> permutation strata; continuous -> mean model; every arm
+                            # must be listed in decision.technical_arms or decision.dosage_arms
     technical: [doublet_score, contamination, pct_ribo, intronic_fraction]  # add DecontX/SoupX estimates
     dosage: [clone]         # CNA clone recruitment types an MP as dosage, not nuisance
   n_depth_bins: 1
@@ -57,7 +62,8 @@ tme:
   n_boot: 200
   n_null: 500               # random gene sets matched on expression and malignant specificity
   covariates: [cancer_type]
-  spillover_adjust: true    # subtract predicted malignant->TME ambient spillover
+  spillover_adjust: true    # subtract predicted malignant->TME ambient spillover (criterion b needs it)
+  rho_sensitivity: 1.5      # re-run with every rho_hat x 1.5; criterion (b) must hold there too (null: off)
 
 positional:
   enabled: true
@@ -67,17 +73,21 @@ positional:
 typer:
   enabled: true
   labels: null              # CSV (mp,label): 1 for curated artefacts, e.g. the 11 MPs removed by hand in 3CA v2
+  labelled_gmt: null        # GMT of the labelled (published) MPs, keyed like `labels`; needed with mps: rederive,
+                            # where each re-derived MP takes the label of its best match (Jaccard >= 0.3)
 
 protocol:
   enabled: true
   reference: fresh
   test: fixed
-  min_pairs: 3              # same-protocol replicate pairs needed for the replicate null
+  min_pairs: 3              # distinct tumours with same-protocol replicate pairs needed for the replicate null
   n_null_sets: 100          # otherwise random matched gene sets in the same paired tumours
+  kappa_min_effect: 0.4054651  # log(1.5): a kappa loss must also exceed 1.5-fold to count
 
-decision:                   # P1-GO v1.0; defaults shown, pre-declared lists must be filled in
-  expected_tme_shared: []   # MP names expected to co-vary with TME cells while real (e.g. IFN/MHC-II, hypoxia)
-  expected_tme_shared_gmt: null   # or gene sets; an MP overlapping one by >= min_overlap genes is excluded from (b)
+decision:                   # P1-GO v1.1; defaults shown, pre-declared lists must be filled in
+  expected_tme_shared: []   # names of audited MPs expected to co-vary with TME cells while real (e.g. IFN/MHC-II,
+                            # hypoxia); only with mps: <GMT> (names of re-derived MPs are not known in advance)
+  expected_tme_shared_gmt: null   # gene sets; an MP overlapping one by >= min_overlap genes is excluded from (b)
   min_overlap: 10
   technical_arms: [technical]
   dosage_arms: [dosage]

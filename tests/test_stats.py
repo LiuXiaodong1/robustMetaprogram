@@ -59,10 +59,11 @@ def test_protocol_loss_is_one_sided():
     from mpaudit.protocol import protocol_shift
 
     rows = []
-    for t, d in zip("ABCD", [-3.0, 2.0, 0.1, -0.1]):
+    # replicate changes +1 and -1 from 2 tumours: s = 1, bound t(0.95, df=2) * s = 2.92 on each side
+    for t, d in zip("ABCD", [-3.0, 3.5, 2.5, -0.1]):
         rows += [{"tumour": t, "protocol": "fresh", "mp": "m", "intensity": 0.0, "prevalence": 0.0},
                  {"tumour": t, "protocol": "fixed", "mp": "m", "intensity": d, "prevalence": 0.0}]
-    for t, d in zip("EF", [1.0, -1.0]):  # same-protocol replicate pairs -> null |delta| = 1
+    for t, d in zip("EF", [1.0, -1.0]):  # same-protocol replicate pairs
         rows += [{"tumour": t, "protocol": "fresh", "mp": "m", "intensity": 0.0, "prevalence": 0.0},
                  {"tumour": t, "protocol": "fresh", "mp": "m", "intensity": d, "prevalence": 0.0}]
     res = protocol_shift(pd.DataFrame(rows), "fresh", "fixed", min_pairs=2).iloc[0]

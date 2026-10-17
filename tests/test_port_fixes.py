@@ -1,5 +1,6 @@
-"""Review fixes to the Gavish port: fit diagnostics, cache code version, v2 gene order, sample
-order, Process_mat parity, eligible universe, and method variants in the instability axis."""
+"""Review fixes to the Gavish port: fit diagnostics, cache code version and cache hits, parameter
+validation and early key checks, v2 gene order, sample order, Process_mat parity, eligible
+universe, and method variants in the instability axis."""
 import inspect
 
 import numpy as np
@@ -9,7 +10,8 @@ import scipy.sparse as sp
 
 from mpaudit import Keys, data, decoy, gavish, nmf
 from mpaudit.gavish import (MP, GavishParams, GavishResult, NMFCache, SamplePrograms, assemble, collect_top,
-                            compute_programs, eligible_universe, prepare_matrix, v2_gene_order)
+                            compute_programs, eligible_universe, order_samples, prepare_matrix, run_gavish,
+                            v2_gene_order)
 from mpaudit.instability import Perturbation, default_perturbations, run_instability
 from mpaudit.nmf import best_of_runs, snmf_r
 
@@ -47,10 +49,24 @@ def test_snmf_info_reports_convergence_and_cap():
     A = planted()
     assert len(snmf_r(A, 3, rng=1)) == 3  # default return unchanged
     *_, info = snmf_r(A, 3, rng=1, return_info=True)
-    assert set(info) == {"n_iter", "converged", "restarts"}
-    assert info["converged"] and info["n_iter"] < 5000 and info["n_iter"] % 5 == 0  # tested every 5
+    assert set(info) == {"n_iter", "converged", "restarts", "failed"}
+    assert info["converged"] and not info["failed"] and info["n_iter"] < 5000 and info["n_iter"] % 5 == 0
     *_, capped = snmf_r(A, 3, rng=1, max_iter=8, return_info=True)
-    assert capped == {"n_iter": 8, "converged": False, "restarts": 0}
+    assert capped == {"n_iter": 8, "converged": False, "restarts": 0, "failed": False}
+
+
+def test_restart_limit_is_counted_as_failed():
+    """Runs stopped by the restart limit are neither converged nor capped; they are counted apart."""
+    rng = np.random.default_rng(0)
+    with pytest.warns(RuntimeWarning, match="restarts"):
+        W, infos = best_of_runs(rng.random((100, 40)), 6, nrun=3, beta=1e4, return_info=True)
+    assert all(i["failed"] and not i["converged"] and i["restarts"] == 10 and i["n_iter"] < 5000 for i in infos)
+    summary = gavish._fit_summary(infos, 5000)
+    assert (summary["n_runs"], summary["n_capped"], summary["n_failed"]) == (3, 0, 3)
+    spg = {"s": SamplePrograms(sample="s", universe=np.array([f"g{i}" for i in range(100)]),
+                               W={6: W.astype(np.float32)}, fits={6: summary})}
+    res = assemble(spg, GavishParams(ranks=(6,)))
+    assert (res.n_fits, res.n_capped_fits, res.n_failed_fits) == (3, 0, 3)
 
 
 def test_best_of_runs_reports_every_run():
@@ -73,15 +89,59 @@ def test_fit_diagnostics_reach_sample_programs_and_result():
     spg = compute_programs(adata, KEYS, p, cache=cache)
     assert list(spg) == ["s0", "s1", "s2"]
     for s in spg.values():  # max_iter=8 < second convergence test: every run is capped
-        assert s.fits == {r: {"n_runs": 2, "n_capped": 2, "mean_iter": 8.0} for r in (2, 3)}
+        assert s.fits == {r: {"n_runs": 2, "n_capped": 2, "n_failed": 0, "mean_iter": 8.0} for r in (2, 3)}
     res = assemble(spg, p)
-    assert (res.n_fits, res.n_capped_fits) == (12, 12)
-    again = compute_programs(adata, KEYS, p, cache=cache)  # cache hits carry the diagnostics
-    assert all(again[s].fits == spg[s].fits for s in spg)
+    assert (res.n_fits, res.n_capped_fits, res.n_failed_fits) == (12, 12, 0)
 
     p2 = p.replace(max_iter=5000)
     res2 = assemble(compute_programs(adata, KEYS, p2), p2)
     assert (res2.n_fits, res2.n_capped_fits) == (12, 0)
+
+
+# --------------------------------------------------------------------------- cache hits
+
+def _spy_fit_job(monkeypatch) -> list:
+    """Replace gavish._fit_job by a wrapper recording (sample, ranks) of every fitting job."""
+    calls, real = [], gavish._fit_job
+    monkeypatch.setattr(gavish, "_fit_job", lambda job: calls.append((job[0], job[4])) or real(job))
+    return calls
+
+
+def test_memory_cache_hits_skip_fitting(monkeypatch):
+    adata = toy_adata()
+    p = GavishParams(ranks=(2, 3), nrun=2, max_iter=8, min_genes_per_cell=0, min_cells=10)
+    calls = _spy_fit_job(monkeypatch)
+    cache = NMFCache()
+    spg = compute_programs(adata, KEYS, p, cache=cache)
+    assert calls == [(s, (2, 3)) for s in ("s0", "s1", "s2")]
+    again = compute_programs(adata, KEYS, p, cache=cache)
+    assert len(calls) == 3  # every (sample, rank) came from the cache
+    for s in spg:  # the cached objects themselves, diagnostics included
+        assert again[s].universe is spg[s].universe
+        assert all(again[s].W[r] is spg[s].W[r] and again[s].fits[r] is spg[s].fits[r] for r in p.ranks)
+    more = compute_programs(adata, KEYS, p.replace(ranks=(2, 3, 4)), cache=cache)
+    assert calls[3:] == [(s, (4,)) for s in ("s0", "s1", "s2")]  # only the missing rank is fitted
+    assert all(more[s].W[2] is spg[s].W[2] and set(more[s].fits) == {2, 3, 4} for s in spg)
+
+
+def test_disk_cache_hits_skip_fitting(monkeypatch, tmp_path):
+    adata = toy_adata()
+    p = GavishParams(ranks=(2, 3), nrun=2, max_iter=8, min_genes_per_cell=0, min_cells=10)
+    calls = _spy_fit_job(monkeypatch)
+    first = compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    assert len(calls) == 3 and len(list(tmp_path.glob("*.pkl"))) == 6
+    cache = NMFCache(tmp_path)  # a fresh object: hits can only come from the files
+    back = compute_programs(adata, KEYS, p, cache=cache)
+    assert len(calls) == 3 and cache.mem == {}
+    for s in first:
+        assert np.array_equal(back[s].universe, first[s].universe)
+        for r in p.ranks:
+            assert back[s].W[r].dtype == np.float32 and np.array_equal(back[s].W[r], first[s].W[r])
+            assert back[s].fits[r] == first[s].fits[r] == {"n_runs": 2, "n_capped": 2, "n_failed": 0,
+                                                            "mean_iter": 8.0}
+    monkeypatch.setattr(gavish, "CODE_VERSION", "edited")  # other code: the files are not served
+    compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    assert len(calls) == 6
 
 
 # --------------------------------------------------------------------------- cache code version
@@ -94,13 +154,89 @@ def test_cache_key_includes_code_version(monkeypatch):
     assert NMFCache.key("data", "fp", "s", 4, p) != k0
 
 
-@pytest.mark.parametrize("target", [nmf, decoy, data.log2_cpm10, prepare_matrix, gavish._fit_job])
+@pytest.mark.parametrize("target", [nmf, decoy, data.log2_cpm10, prepare_matrix, gavish._fit_job,
+                                    gavish._fit_summary])
 def test_code_version_covers_fit_sources(monkeypatch, target):
     v0 = gavish.code_version()
     real = inspect.getsource
     monkeypatch.setattr(gavish, "CODE_VERSION", None)
     monkeypatch.setattr(inspect, "getsource", lambda obj: real(obj) + ("\n# edit" if obj is target else ""))
     assert gavish.code_version() != v0
+
+
+def test_code_version_covers_cache_format(monkeypatch):
+    v0 = gavish.code_version()
+    monkeypatch.setattr(gavish, "CODE_VERSION", None)
+    monkeypatch.setattr(gavish, "CACHE_FORMAT", gavish.CACHE_FORMAT + 1)
+    assert gavish.code_version() != v0
+
+
+# --------------------------------------------------------------------------- parameter checks
+
+@pytest.mark.parametrize("field,value", [("sample_order", "studies"), ("founder_order", "dendrogram"),
+                                         ("gene_universe", "hvgs")])
+def test_params_reject_unknown_options(field, value):
+    for build in (lambda: GavishParams(**{field: value}), lambda: GavishParams().replace(**{field: value}),
+                  lambda: GavishParams.from_dict({field: value})):
+        with pytest.raises(ValueError, match=f"Unknown {field}"):
+            build()
+    with pytest.raises(ValueError, match="Unknown GavishParams field"):
+        GavishParams.from_dict({"sampel_order": "study"})
+
+
+def test_params_convert_yaml_strings():
+    yaml = pytest.importorskip("yaml")
+    d = yaml.safe_load("tol: 1e-8\nbeta: 1e-2\neta: null\nmax_iter: 5e3\nnrun: '3'\nranks: [4, '5', 6.0]\n"
+                       "center: 'false'\n")
+    assert d["tol"] == "1e-8" and d["max_iter"] == "5e3"  # YAML 1.1 floats need a decimal point
+    p = GavishParams.from_dict(d)
+    assert (p.tol, p.beta, p.eta, p.max_iter, p.nrun, p.ranks, p.center) == (1e-8, 0.01, None, 5000, 3, (4, 5, 6), False)
+    assert [type(v) for v in (p.tol, p.beta, p.max_iter, p.nrun, p.center, *p.ranks)] == [float, float, int, int, bool,
+                                                                                         int, int, int]
+    typed = GavishParams(tol=1e-8, beta=0.01, max_iter=5000, nrun=3, ranks=(4, 5, 6), center=False)
+    assert p == typed and NMFCache.key("data", "fp", "s", 4, p) == NMFCache.key("data", "fp", "s", 4, typed)
+    assert GavishParams(eta="2.5").eta == 2.5 and type(GavishParams(beta=0).beta) is float
+    assert GavishParams(ranks=4).ranks == (4,)
+    for bad in ({"max_iter": 2.5}, {"tol": "1e-8x"}, {"nrun": True}, {"ranks": [4, 4]}, {"center": "maybe"},
+                {"nrun": 0}, {"tol": -1e-8}):
+        with pytest.raises(ValueError):
+            GavishParams.from_dict(bad)
+
+
+def test_string_tol_fits():
+    """A YAML-string tol used to crash snmf_r at the second convergence test (it=10)."""
+    p = GavishParams.from_dict({"tol": "1e-8", "ranks": [2], "nrun": 1, "max_iter": 20, "min_genes_per_cell": 0,
+                                "min_cells": 10})
+    spg = compute_programs(toy_adata(n_samples=1), KEYS, p)
+    assert spg["s0"].fits[2]["mean_iter"] == 20
+
+
+_NO_STUDY = Keys(sample="sample", malignant="malignant")
+
+
+@pytest.mark.parametrize("kw,keys", [({"sample_order": "study"}, _NO_STUDY), ({"v2_gene_order": True}, _NO_STUDY),
+                                     ({"min_studies_per_mp": 2}, _NO_STUDY),
+                                     ({"v2_gene_order": True}, Keys(sample="sample", malignant="malignant",
+                                                                    study="no_such_column"))])
+def test_study_options_fail_before_any_nmf(monkeypatch, kw, keys):
+    adata = toy_adata()
+    calls = _spy_fit_job(monkeypatch)
+    p = GavishParams(ranks=(2,), nrun=1, max_iter=5, min_genes_per_cell=0, min_cells=10, **kw)
+    with pytest.raises(ValueError, match="study"):
+        run_gavish(adata, keys, p)
+    with pytest.raises(ValueError, match="study"):
+        compute_programs(adata, keys, p)
+    assert calls == []
+    run_gavish(adata, KEYS, p)  # with the study column the same settings run
+    assert len(calls) == 3
+
+
+def test_missing_recurrence_column_fails_before_any_nmf(monkeypatch):
+    calls = _spy_fit_job(monkeypatch)
+    with pytest.raises(ValueError, match="recurrence_key"):
+        run_gavish(toy_adata(), KEYS, GavishParams(ranks=(2,), nrun=1, min_genes_per_cell=0, min_cells=10),
+                   recurrence_key="tumour")
+    assert calls == []
 
 
 # --------------------------------------------------------------------------- v2 gene order
@@ -148,7 +284,18 @@ def test_sample_order_options():
     with pytest.raises(ValueError, match="study"):
         collect_top(spg, GavishParams(ranks=(2,), sample_order="study"))
     with pytest.raises(ValueError, match="sample_order"):
-        collect_top(spg, GavishParams(ranks=(2,), sample_order="random"), study)
+        GavishParams(ranks=(2,), sample_order="random")
+
+
+def test_study_order_is_not_r_file_order_but_input_reproduces_it():
+    """The module docstring's example: R lists '<sample>_rank4_9_nrun10.RDS' files, so prefixed
+    names sort differently from the bare names; only 'input' with R's order reproduces it."""
+    samples = ["P1", "P10", "P2", "MGH10", "MGH100"]
+    study = dict.fromkeys(samples, "S1")
+    r_order = [f.split("_rank")[0] for f in sorted(f"{s}_rank4_9_nrun10.RDS" for s in samples)]  # C locale
+    assert r_order == ["MGH100", "MGH10", "P10", "P1", "P2"]
+    assert order_samples(samples, GavishParams(sample_order="study"), study) == ["MGH10", "MGH100", "P1", "P10", "P2"]
+    assert order_samples(r_order, GavishParams(sample_order="input"), study) == r_order
 
 
 # --------------------------------------------------------------------------- Process_mat parity
@@ -216,3 +363,13 @@ def test_method_variants_stay_out_of_recovery_all(monkeypatch):
 
     res = run_instability(None, Keys(), GavishParams(), perts[:1], log=lambda *_: None)
     assert np.isnan(res.per_mp.iloc[0]["recovery_method_variant"])
+
+
+def test_instability_checks_every_perturbation_before_fitting(monkeypatch):
+    from mpaudit import instability
+
+    monkeypatch.setattr(instability, "compute_programs", lambda *a, **kw: pytest.fail("NMF ran"))
+    for pert, match in ((Perturbation("typo", "threshold", {"intra_mn": 30}), "Unknown GavishParams field"),
+                        (Perturbation("order", "order", {"sample_order": "study"}), "keys.study")):
+        with pytest.raises(ValueError, match=match):
+            run_instability(None, Keys(), GavishParams(), [pert], log=lambda *_: None)

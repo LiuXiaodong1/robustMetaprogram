@@ -6,8 +6,10 @@
 The port's bases come from :func:`mpaudit.gavish.compute_programs` on the exported samples with the
 exported parameters (``--h5ad``, default: the export's source file; ``--cache-dir`` reuses an
 ``mpaudit p1`` NMF cache), or are loaded from a basis directory written by an earlier run
-(``--python-bases``; every run writes ``<out>/python_bases``). R's bases are read from
-``run_r_snmf.R``'s output. Three levels are compared, always on the ranks both sides have:
+(``--python-bases``; every run writes ``<out>/python_bases``). Parity exports use
+``gavish.tol: 1.0e-8`` (the audit default is 1e-7); the report notes a looser exported ``tol``.
+R's bases are read from ``run_r_snmf.R``'s output. Three levels are compared, always on the ranks
+both sides have:
 
 1. Programs. Per sample and rank, R's k programs are paired one-to-one with the port's k programs
    by the Hungarian assignment that maximises the summed top-``n_top`` overlap (dead, all-zero
@@ -347,8 +349,10 @@ def guide(n_top: int) -> str:
   more than a rerun of either; quote absolute numbers with that caveat and the replicate's numbers.
 - **FAIL**: look at the profile objectives. If the port's basis fits worse at most sample-ranks
   (py_vs_r_pct > 0), however small the difference (early stopping costs little objective but moves
-  top genes), the port stops short of R: lower `tol` (e.g. 1e-7) or raise `max_iter`, re-export,
-  rerun. If the signs are mixed, the solvers reach different, equally good optima (NMF is not
+  top genes), the port stops short of R: lower `gavish.tol` further (parity runs use 1.0e-8; try
+  1.0e-9, written with a decimal point so YAML reads a number) or raise `max_iter` (if fits hit
+  it), re-export and compare again (R ignores tol and max_iter: its output can be reused). If the
+  signs are mixed, the solvers reach different, equally good optima (NMF is not
   identifiable); then robust-program and MP agreement decide whether MP-level results survive the
   solver change, and absolute counts must not be quoted as 3CA-equivalent.
   Without a seed replicate a FAIL is not interpretable: rerun with `--python-replicate-seed`.
@@ -409,7 +413,7 @@ def write_report(out: Path, main: dict, baselines: dict, ranks_tbl: pd.DataFrame
              + "".join(f"; {k} {v}" for k, v in info["r_versions"].items()),
              f"- port: {info['python_source']} (mpaudit {info['mpaudit_version']}, code {info['code_version']})",
              f"- ranks {info['ranks']}, nrun {info['nrun']}, n_top {info['n_top']}, R seed {info['r_seed']}, "
-             f"port seed {info['py_seed']}"]
+             f"port seed {info['py_seed']}, port tol {info['tol']:g}, max_iter {info['max_iter']}"]
     lines += [f"- note: {n}" for n in info["notes"]]
     lines += ["", "## Input checks", ""]
     lines += [f"- {i}" for i in info["issues"]] or ["- all samples: R read the exported matrix (dimensions, sum, max) "
@@ -519,6 +523,9 @@ def main(argv=None) -> dict:
     if (r_out / "versions.csv").exists():
         vv = pd.read_csv(r_out / "versions.csv", keep_default_na=False).set_index("key")["value"]
         r_versions = {k: vv[k] for k in ("R", "NMF", "seed") if k in vv.index}
+    if params.tol > pio.PARITY_TOL:
+        notes.append(f"the port was fitted at tol={params.tol:g}, looser than the parity setting "
+                     f"(gavish.tol: 1.0e-8): a FAIL may only show early stopping; re-export at 1.0e-8")
     code_now = gavish.code_version() if hasattr(gavish, "code_version") else None
     if manifest.get("code_version") not in (None, code_now):
         notes.append(f"export made with mpaudit code {manifest['code_version']}, port now {code_now}: "
@@ -528,7 +535,8 @@ def main(argv=None) -> dict:
         "export_version": manifest.get("mpaudit_version"), "export_code": manifest.get("code_version"),
         "mpaudit_version": metadata.version("mpaudit"), "code_version": code_now, "r_versions": r_versions,
         "python_source": python_source, "ranks": ranks, "nrun": params.nrun, "n_top": params.n_top,
-        "r_seed": manifest.get("r_seed"), "py_seed": params.seed, "notes": notes, "issues": issues,
+        "r_seed": manifest.get("r_seed"), "py_seed": params.seed, "tol": params.tol, "max_iter": params.max_iter,
+        "notes": notes, "issues": issues,
         "objective": objective_summary(obj),
     }
     main_cmp["programs"].to_csv(out / "programs.csv", index=False)

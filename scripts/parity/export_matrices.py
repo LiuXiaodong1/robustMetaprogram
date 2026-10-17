@@ -10,6 +10,11 @@ Matrix Market file with ``genes.txt`` and ``cells.txt``; see ``parity_io`` for t
 are written as shortest round-trip decimals, so Python reads back the identical doubles; R's parser
 can differ in the last bit, which ``compare.py`` tolerates (it checks R's reported sum and max).
 
+Use the audit's config with ``gavish.tol: 1.0e-8`` (the parity setting; written with a decimal point
+so YAML reads a number). The export records the parameters and ``compare.py`` fits the port with
+them; R ignores ``tol``. An export with a looser ``tol`` is flagged here and in the report. The keys
+the MP stage needs are checked first (:func:`mpaudit.gavish.check_keys`).
+
 ``--n`` picks the samples with the most NMF cells: these take longest in R but give the most stable
 programs. ``manifest.json`` records the keys, counts layer and :class:`mpaudit.gavish.GavishParams`
 (from the ``mpaudit p1`` config), the seed R should use and, per sample, the matrix size, sum, max
@@ -44,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import parity_io as pio  # noqa: E402
 
 from mpaudit.data import Keys, get_counts, log2_cpm10, malignant_mask  # noqa: E402
-from mpaudit.gavish import GavishParams, prepare_matrix  # noqa: E402
+from mpaudit.gavish import GavishParams, check_keys, prepare_matrix  # noqa: E402
 
 DEFAULT_R_SEED = 123456
 
@@ -108,6 +113,10 @@ def export(adata, cfg: dict, out: Path, *, samples: list[str] | None = None, n: 
     keys = Keys.from_dict(cfg.get("keys"))
     params = GavishParams.from_dict(cfg.get("gavish"))
     layer, rk = cfg.get("counts_layer"), cfg.get("recurrence_key")
+    check_keys(keys, params, adata, recurrence_key=rk)
+    if params.tol > pio.PARITY_TOL:
+        log(f"[export] note: gavish.tol is {params.tol:g}; parity runs use gavish.tol: 1.0e-8 "
+            f"(compare.py fits the port with the exported tol)")
     if not adata.var_names.is_unique:
         raise ValueError("var_names are not unique; call adata.var_names_make_unique() first")
     counts = get_counts(adata, layer)

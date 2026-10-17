@@ -1,6 +1,8 @@
 """Python port of the Gavish et al. 2023 / 3CA metaprogram (MP) pipeline.
 
-Steps (3CA defaults in brackets; every constant is a field of :class:`GavishParams`):
+Steps (3CA defaults in brackets; every constant is a field of :class:`GavishParams`, which checks
+its fields when constructed: unknown option names and values raise ``ValueError``, and numbers
+given as strings, as PyYAML reads ``1e-8``, are converted):
 
 1. Per sample, malignant cells with >= ``min_genes_per_cell`` detected genes [1,000]:
    log2(CPM/10 + 1); keep the top genes by mean expression [7,000]; centre each gene; set
@@ -8,7 +10,9 @@ Steps (3CA defaults in brackets; every constant is a field of :class:`GavishPara
    ``MP_analysis_new_batch.R:95-106``; NMF cannot fit them).
 2. sNMF/R at each rank [4-9], keeping the best of ``nrun`` restarts [10]; each program is
    summarised by its top genes [50]. All-zero basis columns (dead components) are skipped, so
-   they never enter the program filters (counted in ``GavishResult.n_dead_programs``).
+   they never enter the program filters (counted in ``GavishResult.n_dead_programs``). Runs
+   stopped by the iteration cap or by the restart limit are counted (``n_capped_fits``,
+   ``n_failed_fits``).
 3. Robust programs: overlap >= ``intra_min`` [35] with another program of the same sample;
    max overlap >= ``inter_min`` [10] with a program from another sample; greedy within-sample
    redundancy pruning at ``intra_max`` [10].
@@ -25,19 +29,25 @@ and renozao/NMF (``R/algorithms-snmf.R``). Remaining differences:
 * NMF optimiser and stopping rule (HALS on the same objective; see :mod:`mpaudit.nmf`). The port
   stops on a relative objective change tested every 5 iterations, capped at ``max_iter`` [5,000];
   R tests assignment stability plus a KKT residual every 5 iterations, capped at 20,000. Fits
-  that stop at the cap are counted in ``GavishResult.n_capped_fits`` (per sample and rank in
-  ``SamplePrograms.fits``). On the toy cohort the tolerance binds long before the cap, and at
-  ``tol=1e-5`` the port stopped about 5x earlier than R's rule would, with top-50 lists not yet
-  stable; the default is therefore ``tol=1e-7`` (numbers in :mod:`mpaudit.nmf`); use 1e-8 for
-  parity runs.
+  that stop at the cap are counted in ``GavishResult.n_capped_fits``, and fits stopped by the
+  restart limit (all-zero rows of ``H``; R also warns and stops) in ``n_failed_fits`` (per sample
+  and rank in ``SamplePrograms.fits``). On the toy cohort the tolerance binds long before the
+  cap, and at ``tol=1e-5`` the port stopped about 5x earlier than R's rule would, with top-50
+  lists not yet stable; the default is therefore ``tol=1e-7`` (numbers in :mod:`mpaudit.nmf`).
+  Parity runs against R use ``tol=1e-8`` (``gavish.tol: 1.0e-8``; see ``scripts/parity``).
 * Sample order, which sets the column order of the program matrices and therefore how ties are
   broken in the robust-program filter, the founder ranking and the dendrogram. 3CA v2 iterates
   over NMF output files: the old batch, then the new batch, each by study folder and then file
-  name (``list.files`` order, which follows R's collation locale). ``sample_order`` offers
-  ``"alphabetical"`` (default), ``"study"`` (study, then sample name, by code point; v2 order
-  within one batch when R collates in the C locale) and ``"input"``. To reproduce v2 exactly,
-  pass the samples in v2 order and use ``"input"``. Ties are common: overlaps are integers and
-  most program pairs sit at the same distance (50).
+  name (``list.files`` order, which follows R's collation locale). The file names carry a suffix
+  (``<sample>_rank4_9_nrun10.RDS``), so where one sample name is a prefix of another, R's order
+  can differ from a sort of the bare names: in the C locale ``P10_rank...`` sorts before
+  ``P1_rank...`` (digits and capitals sort before ``_``), so R lists MGH100, MGH10, P10, P1, P2
+  where the bare names sort MGH10, MGH100, P1, P10, P2. ``sample_order`` offers ``"alphabetical"``
+  (default; sample name by code point), ``"study"`` (study, then sample name, by code point; not
+  R's order in general, for the reason above) and ``"input"``. To reproduce v2 exactly, list the
+  samples in R's file order (e.g. from the NMF output folders) and use ``"input"``, passing that
+  list as ``samples`` to :func:`compute_programs` or ordering the cohort by it. Ties are common:
+  overlaps are integers and most program pairs sit at the same distance (50).
 * Dead components: R keeps an all-zero basis column; its "top 50 genes" are then the first 50
   universe genes (R's sort is stable), i.e. the sample's highest-mean genes, the same at every
   rank. The port skips such columns (step 2). Both codes restart when a row of ``H`` is all zero, so dead
@@ -63,6 +73,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import inspect
+import math
 import pickle
 import zlib
 from collections import Counter
@@ -78,8 +89,97 @@ from .data import Keys, get_counts, log2_cpm10, malignant_mask, sample_map
 from .nmf import best_of_runs
 
 
+SAMPLE_ORDERS = ("alphabetical", "study", "input")
+FOUNDER_ORDERS = ("hclust", "input")
+GENE_UNIVERSES = ("top_mean", "hvg")
+_TRUE, _FALSE = {"true", "yes", "on", "1"}, {"false", "no", "off", "0"}
+
+
+def _as_int(name: str, v) -> int:
+    if isinstance(v, (bool, np.bool_)):
+        raise ValueError(f"GavishParams.{name} must be an integer, got {v!r}")
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            pass
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"GavishParams.{name} must be an integer, got {v!r}") from None
+    if not (math.isfinite(f) and f.is_integer()):
+        raise ValueError(f"GavishParams.{name} must be an integer, got {v!r}")
+    return int(f)
+
+
+def _as_float(name: str, v) -> float:
+    if isinstance(v, (bool, np.bool_)):
+        raise ValueError(f"GavishParams.{name} must be a number, got {v!r}")
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"GavishParams.{name} must be a number, got {v!r}") from None
+    if not math.isfinite(f):
+        raise ValueError(f"GavishParams.{name} must be finite, got {v!r}")
+    return f
+
+
+def _as_bool(name: str, v) -> bool:
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str) and v.strip().lower() in _TRUE | _FALSE:
+        return v.strip().lower() in _TRUE
+    raise ValueError(f"GavishParams.{name} must be true or false, got {v!r}")
+
+
+def _as_choice(choices: tuple[str, ...]):
+    def conv(name: str, v) -> str:
+        if not isinstance(v, str) or v not in choices:
+            raise ValueError(f"Unknown {name} {v!r}; use one of {', '.join(map(repr, choices))}")
+        return v
+    return conv
+
+
+def _as_ranks(name: str, v) -> tuple[int, ...]:
+    if isinstance(v, (int, np.integer, str)) and not isinstance(v, (bool, np.bool_)):
+        v = [v]
+    try:
+        ranks = tuple(_as_int(name, r) for r in v)
+    except TypeError:
+        raise ValueError(f"GavishParams.{name} must be a list of integers, got {v!r}") from None
+    if not ranks or min(ranks) < 1 or len(set(ranks)) != len(ranks):
+        raise ValueError(f"GavishParams.{name} must be distinct integers >= 1, got {v!r}")
+    return ranks
+
+
+def _as_optional_float(name: str, v) -> float | None:
+    return None if v is None else _as_float(name, v)
+
+
+# Converter per field, chosen by the field's annotation (or by name for the enumerated options).
+_CONVERTERS = {"int": _as_int, "float": _as_float, "bool": _as_bool, "float | None": _as_optional_float,
+               "tuple[int, ...]": _as_ranks}
+_CHOICES = {"gene_universe": GENE_UNIVERSES, "sample_order": SAMPLE_ORDERS, "founder_order": FOUNDER_ORDERS}
+_AT_LEAST_ONE = ("nrun", "n_top", "n_universe", "max_iter")
+_NON_NEGATIVE = ("beta", "tol")
+
+
 @dataclass(frozen=True)
 class GavishParams:
+    """Settings of the port (3CA defaults unless noted).
+
+    Every field is checked when the object is built (directly, by :meth:`replace` or by
+    :meth:`from_dict`): numbers given as strings (PyYAML reads ``tol: 1e-8``, without a decimal
+    point, as a string) and integral floats are converted to the field's type, ``ranks`` becomes a
+    tuple of distinct ints, and an unknown field name, an unknown ``gene_universe``,
+    ``sample_order`` or ``founder_order``, or a value that cannot be converted raises
+    ``ValueError`` before any NMF runs.
+    """
+
     ranks: tuple[int, ...] = (4, 5, 6, 7, 8, 9)
     nrun: int = 10
     n_top: int = 50
@@ -102,7 +202,8 @@ class GavishParams:
     min_group_size: int = 5
     # Column order of the programs (R iterates over NMF output files): "alphabetical" (sample
     # name), "study" (study, then sample name) or "input" (order of first appearance in the cohort,
-    # or the ``samples`` passed to compute_programs). See the module docstring for exact v2 order.
+    # or the ``samples`` passed to compute_programs). Only "input", with the samples in R's file
+    # order, reproduces 3CA v2 (file names carry a suffix; see the module docstring).
     sample_order: str = "alphabetical"
     founder_order: str = "hclust"       # R ranks founders in dendrogram order; or "input"
     # 3CA v2-style steps (off by default, i.e. Gavish 2023 core algorithm)
@@ -111,9 +212,22 @@ class GavishParams:
     drop_two_study_singleton: bool = True  # v2: with 2 studies, drop if one study gives a single NMF
     v2_gene_order: bool = False  # v2: re-sort MP genes by study-deduplicated frequency (needs studies)
 
+    def __post_init__(self):
+        for f in dataclasses.fields(self):
+            conv = _as_choice(_CHOICES[f.name]) if f.name in _CHOICES else _CONVERTERS[f.type]
+            object.__setattr__(self, f.name, conv(f.name, getattr(self, f.name)))
+        for name in _AT_LEAST_ONE:
+            if getattr(self, name) < 1:
+                raise ValueError(f"GavishParams.{name} must be >= 1, got {getattr(self, name)}")
+        for name in _NON_NEGATIVE:
+            if getattr(self, name) < 0:
+                raise ValueError(f"GavishParams.{name} must be >= 0, got {getattr(self, name)}")
+
     def replace(self, **kw) -> "GavishParams":
-        if "ranks" in kw:
-            kw["ranks"] = tuple(int(r) for r in kw["ranks"])
+        unknown = sorted(set(kw) - {f.name for f in dataclasses.fields(self)})
+        if unknown:
+            raise ValueError(f"Unknown GavishParams field(s) {unknown}; known: "
+                             f"{', '.join(f.name for f in dataclasses.fields(self))}")
         return dataclasses.replace(self, **kw)
 
     @classmethod
@@ -126,13 +240,14 @@ class SamplePrograms:
     """NMF basis matrices for one sample, over that sample's gene universe.
 
     ``fits`` holds per-rank fit diagnostics over the ``nrun`` restarts: ``n_runs``, ``n_capped``
-    (runs stopped by ``max_iter`` before the tolerance test passed) and ``mean_iter``.
+    (runs stopped by ``max_iter`` before the tolerance test passed), ``n_failed`` (runs stopped by
+    the restart limit of :func:`mpaudit.nmf.snmf_r`, i.e. unusable fits) and ``mean_iter``.
     """
 
     sample: str
     universe: np.ndarray
     W: dict[int, np.ndarray] = field(default_factory=dict)  # rank -> (n_universe, rank) float32
-    fits: dict[int, dict] = field(default_factory=dict)     # rank -> {"n_runs", "n_capped", "mean_iter"}
+    fits: dict[int, dict] = field(default_factory=dict)     # rank -> {"n_runs", "n_capped", "n_failed", "mean_iter"}
     _index: dict | None = field(default=None, repr=False)
 
     def gene_index(self) -> dict[str, int]:
@@ -158,6 +273,7 @@ class GavishResult:
     n_dead_programs: int = 0
     n_fits: int = 0          # NMF runs behind the programs (samples x ranks x nrun)
     n_capped_fits: int = 0   # of which stopped by max_iter
+    n_failed_fits: int = 0   # of which stopped by the restart limit (all-zero rows of H; unusable)
 
     def mp_sets(self) -> dict[str, list[str]]:
         return {m.name: m.genes for m in self.mps}
@@ -227,6 +343,7 @@ def _fit_summary(infos: list[dict], max_iter: int) -> dict:
     """Diagnostics of the ``nrun`` restarts at one rank (see :class:`SamplePrograms`)."""
     return {"n_runs": len(infos),
             "n_capped": sum(not i["converged"] and i["n_iter"] >= max_iter for i in infos),
+            "n_failed": sum(bool(i.get("failed", False)) for i in infos),
             "mean_iter": float(np.mean([i["n_iter"] for i in infos])) if infos else np.nan}
 
 
@@ -250,23 +367,31 @@ def _fit_job(args):
     return sample, universe, out, fits
 
 
+# Layout of a cached value, the (universe, W, fit summary) tuple NMFCache stores; bump it whenever
+# that layout or the meaning of its fields changes without a change to the sources code_version()
+# hashes. Part of code_version().
+CACHE_FORMAT = 2
+
 # Hash of the code that determines a cached fit; part of every NMFCache key. Computed on first use
 # (the package version is defined after this module is imported); tests may monkeypatch it.
 CODE_VERSION: str | None = None
 
 
 def code_version() -> str:
-    """Hash of the package version and the sources that shape a cached fit: :mod:`mpaudit.nmf`,
-    :func:`prepare_matrix` (with :func:`_universe_index`), :func:`_fit_job`, :func:`_rank_seeds`,
+    """Hash of the package version, :data:`CACHE_FORMAT` and the sources that shape a cached
+    fit: :mod:`mpaudit.nmf`, :func:`prepare_matrix` (with :func:`_universe_index`), :func:`_fit_job`,
+    :func:`_fit_summary` (the cached fit diagnostics), :func:`_rank_seeds`,
     :func:`mpaudit.data.log2_cpm10` and :mod:`mpaudit.decoy` (decoy code changes the decoy
-    inputs). Editing any of them invalidates an on-disk cache instead of silently serving old fits.
+    inputs). Editing any of them invalidates an on-disk cache instead of silently serving old fits
+    or old diagnostics.
     """
     global CODE_VERSION
     if CODE_VERSION is None:
         from . import __version__, data, decoy, nmf
-        sources = [__version__, inspect.getsource(nmf), inspect.getsource(prepare_matrix),
-                   inspect.getsource(_universe_index), inspect.getsource(_fit_job),
-                   inspect.getsource(_rank_seeds), inspect.getsource(data.log2_cpm10), inspect.getsource(decoy)]
+        sources = [__version__, f"cache-format-{CACHE_FORMAT}", inspect.getsource(nmf),
+                   inspect.getsource(prepare_matrix), inspect.getsource(_universe_index),
+                   inspect.getsource(_fit_job), inspect.getsource(_fit_summary), inspect.getsource(_rank_seeds),
+                   inspect.getsource(data.log2_cpm10), inspect.getsource(decoy)]
         CODE_VERSION = hashlib.sha1("\x1e".join(sources).encode()).hexdigest()[:16]
     return CODE_VERSION
 
@@ -342,6 +467,29 @@ def _sample_cells(
     return cells
 
 
+def check_keys(keys: Keys, params: GavishParams, adata=None, *, recurrence_key: str | None = None) -> None:
+    """Raise ``ValueError`` for settings that :func:`assemble` would reject only after every NMF
+    fit has run.
+
+    ``sample_order="study"``, ``v2_gene_order`` and ``min_studies_per_mp > 1`` need a study per
+    sample (``keys.study``). With ``adata``, that study column (when needed) and
+    ``recurrence_key`` must be columns of ``adata.obs``. :func:`run_gavish` and
+    :func:`compute_programs` call this before fitting; callers that build the study map
+    themselves (``study_of_sample``) should call it too.
+    """
+    need = [opt for opt, on in (("sample_order='study'", params.sample_order == "study"),
+                                ("v2_gene_order=True", params.v2_gene_order),
+                                (f"min_studies_per_mp={params.min_studies_per_mp}", params.min_studies_per_mp > 1))
+            if on]
+    if need and not keys.study:
+        raise ValueError(f"GavishParams {', '.join(need)} need(s) a study for each sample: set keys.study")
+    if adata is not None:
+        cols = {"keys.study": keys.study if need else None, "recurrence_key": recurrence_key}
+        missing = [f"{k}={v!r}" for k, v in cols.items() if v and v not in adata.obs.columns]
+        if missing:
+            raise ValueError(f"Not a column of adata.obs: {', '.join(missing)}")
+
+
 def eligible_universe(adata, keys: Keys, params: GavishParams, counts_layer: str | None = None) -> list[str]:
     """Genes that can enter an MP, sorted: the union over samples of the gene universes
     :func:`prepare_matrix` would use, with the cell and sample selection of
@@ -374,8 +522,10 @@ def compute_programs(
     """Run (or fetch from cache) per-sample NMF for every sample with enough malignant cells.
 
     Samples come back in ``samples`` order, else in order of first appearance in ``adata``
-    (the order ``sample_order="input"`` uses).
+    (the order ``sample_order="input"`` uses). Settings the later MP stage needs are checked
+    first (:func:`check_keys`), so a configuration error fails before any NMF.
     """
+    check_keys(keys, params, adata)
     cache = cache or NMFCache()
     counts = get_counts(adata, counts_layer)
     genes = np.asarray(adata.var_names.astype(str))
@@ -428,7 +578,9 @@ def top_genes(weights: np.ndarray, universe: np.ndarray, n: int) -> list[str]:
 
 def order_samples(samples: list[str], params: GavishParams, study_of_sample: dict[str, str] | None = None) -> list[str]:
     """Samples in ``params.sample_order``: ``"alphabetical"``, ``"study"`` (study, then sample
-    name) or ``"input"`` (as given). See the module docstring for reproducing 3CA v2's order."""
+    name, both by code point) or ``"input"`` (as given). Neither sort is R's file order in general
+    (see the module docstring); to reproduce 3CA v2, give the samples in R's order with
+    ``"input"``."""
     if params.sample_order == "alphabetical":
         return sorted(samples)
     if params.sample_order == "study":
@@ -715,7 +867,8 @@ def assemble(
     fits = [spg.fits[r] for spg in kept.values() for r in params.ranks if r in spg.fits]
     return GavishResult(params=params, top=top, program_sample=program_sample, robust=list(robust_top),
                         mps=mps, n_dead_programs=dead, n_fits=sum(f["n_runs"] for f in fits),
-                        n_capped_fits=sum(f["n_capped"] for f in fits))
+                        n_capped_fits=sum(f["n_capped"] for f in fits),
+                        n_failed_fits=sum(f.get("n_failed", 0) for f in fits))
 
 
 def run_gavish(
@@ -734,10 +887,14 @@ def run_gavish(
     ``recurrence_key`` is the obs column defining independent units for the cross-sample
     recurrence filter (default: sample, as in 3CA). Set it to the tumour column when a cohort
     contains several samples per tumour, so that a tumour cannot "recur" with itself.
+
+    The keys and settings the MP stage needs are checked (:func:`check_keys`) and the recurrence
+    and study maps built before any NMF runs, so a configuration error does not cost the fits.
     """
     params = params or GavishParams()
-    spg = compute_programs(adata, keys, params, counts_layer=counts_layer, cache=cache,
-                           data_tag=data_tag, n_jobs=n_jobs)
+    check_keys(keys, params, adata, recurrence_key=recurrence_key)
     unit = sample_map(adata, keys, recurrence_key) if recurrence_key else None
     study = sample_map(adata, keys, keys.study) if keys.study else None
+    spg = compute_programs(adata, keys, params, counts_layer=counts_layer, cache=cache,
+                           data_tag=data_tag, n_jobs=n_jobs)
     return assemble(spg, params, unit_of_sample=unit, study_of_sample=study)

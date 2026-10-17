@@ -8,11 +8,13 @@ from scipy.stats import pearsonr, spearmanr
 
 from mpaudit.coexpr import kappa
 from mpaudit.positional import assign_arms, centromeres
-from mpaudit.sim import RIBO, _estimate_covariates, simulate_cohort
+from mpaudit.sim import FIB_MARKERS, MYELOID_MARKERS, RIBO, T_MARKERS, _estimate_covariates, simulate_cohort
 
 SMALL = dict(n_tumours=6, n_twin=2, n_region=1, n_mal=100, n_tme_per_type=30, n_genes=800, seed=0)
 FLAGS = ("malignant_ambient", "variable_prevalence", "doublet_cycle_coupling", "technical_axes",
          "protocol_capture_bias", "estimated_covariates")
+# flags removing the planted nuisance (off together with technical_axes: the null cohort) -> the set each removes
+NUISANCE = {"dissociation_stress": "stress", "tme_contamination": "contamination", "cna": "CNA_7q"}
 
 
 @lru_cache(maxsize=None)
@@ -63,6 +65,18 @@ def test_new_columns_and_truth():
     axis_genes = (set(sets["abundance"]) - set(RIBO)) | set(sets["long_genes"])
     assert not axis_genes & planted
     assert not set(truth["malignant_markers"]) & (axis_genes | planted)
+    # TME-enriched genes: recorded, generic, never axis or lineage genes, but they may be program genes
+    enriched = truth["tme_enriched"]
+    assert set(enriched) == {"T", "Myeloid", "Fibroblast"} and all(len(g) == 30 for g in enriched.values())
+    tme_enriched = set().union(*enriched.values())
+    assert all(g.startswith("G") for g in tme_enriched)
+    assert not tme_enriched & (axis_genes | set(truth["malignant_markers"]))
+    assert tme_enriched & planted  # seed 0 puts planted program genes among them (module docstring)
+    cpm, ct = _cpm(_dense(adata)), obs["cell_type"].to_numpy()
+    for t, g in enriched.items():
+        idx = _idx(adata, g)
+        fold = (cpm[ct == t][:, idx].mean(axis=0) + 1) / (cpm[ct == "Malignant"][:, idx].mean(axis=0) + 1)
+        assert np.median(fold) > 3
     assert truth["kinds"]["abundance"] == "technical (abundance / %ribo)"
     assert truth["kinds"]["long_genes"] == "technical (gene length / nuclear fraction)"
     assert set(truth["kinds"]) == set(sets) and truth["expected_tme_shared"] == ["IFN"]
@@ -101,6 +115,85 @@ def test_flags_give_paired_ablations():
     no_capture, _ = _cohort("protocol_capture_bias")
     fresh = (on.obs["protocol"] == "fresh").to_numpy()
     assert (on.layers["counts"][fresh] != no_capture.layers["counts"][fresh]).nnz == 0
+
+
+def _share(X: np.ndarray, rows: np.ndarray, idx) -> float:
+    """Mean per-cell share of counts on genes ``idx`` among ``rows``."""
+    return float((X[rows][:, idx].sum(axis=1) / X[rows].sum(axis=1)).mean())
+
+
+def test_nuisance_flags_give_paired_ablations():
+    """Each nuisance flag alone, and all nine flags together, keep the all-on cohort's cells and states."""
+    on, t_on = _cohort()
+    obs = on.obs
+    # cells whose doublet score is the plain singlet draw in every cohort (TME cells included)
+    plain = ~t_on["cells"]["doublet"].to_numpy() & ~t_on["cells"]["cycle"].to_numpy()
+    assert t_on["cells"]["doublet"].sum() >= 10
+    for off_flags in [(f,) for f in NUISANCE] + [FLAGS + tuple(NUISANCE)]:
+        off, t_off = _cohort(*off_flags)
+        states = ["cycle", "EMT", "IFN", "cytoplasmic", "nuclear"]
+        if "variable_prevalence" not in off_flags:  # that flag sets the hypoxic fraction itself
+            states.append("hypoxia")
+        pd.testing.assert_frame_equal(t_on["cells"][states], t_off["cells"][states])
+        for col in ["sample", "cell_type"] + (["clone"] if "cna" not in off_flags else []):
+            assert (obs[col] == off.obs[col]).all(), (off_flags, col)
+        assert np.array_equal(obs["doublet_score"][plain], off.obs["doublet_score"][plain]), off_flags
+        assert t_on["private"] == t_off["private"]
+        assert all(t_on["sets"][k] == t_off["sets"][k] for k in t_off["sets"])
+        assert not {NUISANCE[f] for f in off_flags if f in NUISANCE} & set(t_off["sets"])
+
+
+def test_tme_contamination_flag_removes_doublets_and_ambient_only():
+    on, t_on = _cohort()
+    off, t_off = _cohort("tme_contamination")
+    mal = on.obs["malignant"].to_numpy(bool)
+    X_on, X_off = _dense(on), _dense(off)
+    # TME cells untouched: bit-identical counts and covariates
+    assert (X_on[~mal] != X_off[~mal]).sum() == 0
+    for col in ["doublet_score", "contamination", "intronic_fraction"]:
+        assert np.array_equal(on.obs[col][~mal], off.obs[col][~mal]), col
+    # no doublets, and the removed ones score like singlets ...
+    assert t_on["cells"]["doublet"].any() and not t_off["cells"]["doublet"].any()
+    removed = (t_on["cells"]["doublet"] & ~t_on["cells"]["cycle"]).to_numpy()
+    assert on.obs["doublet_score"][removed].mean() > 0.65 and off.obs["doublet_score"][removed].mean() < 0.35
+    # ... and rho = 0: the recorded fraction is the (paired) noise alone, never above the planted one
+    c_on, c_off = on.obs["contamination"][mal].to_numpy(), off.obs["contamination"][mal].to_numpy()
+    assert (c_off <= c_on).all() and c_off.max() < 0.05 and c_on.mean() > 0.03
+    singlet = mal & ~t_on["cells"]["doublet"].to_numpy()
+    markers = _idx(on, dict.fromkeys(T_MARKERS + MYELOID_MARKERS + FIB_MARKERS))
+    assert _share(X_on, singlet, markers) > 1.2 * _share(X_off, singlet, markers)
+
+
+def test_dissociation_stress_flag_removes_stress_scaling():
+    on, t_on = _cohort()
+    off, _ = _cohort("dissociation_stress")
+    mal = on.obs["malignant"].to_numpy(bool)
+    fixed = (on.obs["protocol"] == "fixed").to_numpy()
+    X_on, X_off = _dense(on), _dense(off)
+    assert (X_on[fixed] != X_off[fixed]).sum() == 0  # no stress under the fixed protocol either way
+    stress = _idx(on, t_on["sets"]["stress"])
+    for grp in (mal, ~mal):
+        fresh_on, fresh_off = _share(X_on, grp & ~fixed, stress), _share(X_off, grp & ~fixed, stress)
+        assert fresh_on > 2 * fresh_off
+        # unscaled: fresh cells now carry about the fixed cells' stress share (capture bias aside)
+        assert 0.67 < fresh_off / _share(X_off, grp & fixed, stress) < 1.5
+        assert fresh_on / _share(X_on, grp & fixed, stress) > 2
+
+
+def test_cna_flag_removes_clones_and_dosage():
+    on, t_on = _cohort()
+    off, t_off = _cohort("cna")
+    mal = on.obs["malignant"].to_numpy(bool)
+    X_on, X_off = _dense(on), _dense(off)
+    assert set(off.obs.loc[mal, "clone"]) == {"c1"} and t_off["tumours_cna"] == []
+    cna_t = on.obs["tumour"].isin(t_on["tumours_cna"]).to_numpy()
+    assert cna_t.any() and (X_on[~cna_t] != X_off[~cna_t]).sum() == 0  # other tumours untouched
+    # the planted subclone (labels from the all-on cohort) no longer differs on the CNA arm
+    c2 = mal & (on.obs["clone"] == "c2").to_numpy()
+    c1 = mal & cna_t & ~c2
+    arm = _idx(on, t_on["sets"]["CNA_7q"])
+    assert _share(X_on, c2, arm) / _share(X_on, c1, arm) > 2
+    assert 0.8 < _share(X_off, c2, arm) / _share(X_off, c1, arm) < 1.25
 
 
 def test_malignant_ambient_leaks_malignant_genes_into_tme():

@@ -41,6 +41,9 @@ GENES = "genes.txt"
 CELLS = "cells.txt"
 FITS = "fits.csv"
 INPUT_CHECK = "input_check.csv"
+# The port's convergence tolerance for parity runs (config ``gavish.tol: 1.0e-8``; the audit default
+# is 1e-7). Looser exports are flagged by export_matrices.py and compare.py.
+PARITY_TOL = 1e-8
 
 
 def basis_file(rank: int) -> str:

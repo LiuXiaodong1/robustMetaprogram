@@ -1,5 +1,6 @@
 """Per-cell QC covariates, GTF gene lengths and the typer's gene-length / %ribo / intronic features."""
 import gzip
+import warnings
 
 import anndata as ad
 import numpy as np
@@ -83,7 +84,9 @@ def test_gtf_positions_and_lengths(tmp_path, gz):
             fh.write(GTF)
     else:
         path.write_text(GTF)
-    pos = gene_positions_from_gtf(path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # gene records present: no fallback, no warning
+        pos = gene_positions_from_gtf(path)
     assert list(pos.columns) == ["chromosome", "start", "end", "length"]
     assert list(pos.index) == ["AAA", "LONG1", "PAR1"]  # gene records only; first PAR1 record kept; G4 unnamed
     assert pos.loc["LONG1", "chromosome"] == "7"
@@ -92,6 +95,62 @@ def test_gtf_positions_and_lengths(tmp_path, gz):
     pd.testing.assert_series_equal(gene_lengths(pos), pos["length"].astype(float).rename("gene_length"))
     arms = assign_arms(pos, {"1": 5e3, "7": 5e7})
     assert arms["AAA"] == "1p" and arms["LONG1"] == "7q" and pd.isna(arms["PAR1"])
+
+
+# UCSC ncbiRefSeq style: transcript and exon lines only, no gene records
+UCSC_GTF_2LINE = """\
+chr1\tncbiRefSeq.2022-10-28\ttranscript\t11874\t14409\t.\t+\t.\tgene_id "DDX11L1"; transcript_id "NR_046018.2"; gene_name "DDX11L1";
+chr1\tncbiRefSeq.2022-10-28\texon\t11874\t12227\t.\t+\t.\tgene_id "DDX11L1"; transcript_id "NR_046018.2"; exon_number "1"; gene_name "DDX11L1";
+"""
+UCSC_GTF = UCSC_GTF_2LINE + """\
+chr7\tncbiRefSeq\ttranscript\t300\t900\t.\t-\t.\tgene_id "TWO"; transcript_id "NM_2.1"; gene_name "TWO";
+chr7\tncbiRefSeq\texon\t300\t400\t.\t-\t.\tgene_id "TWO"; transcript_id "NM_2.1"; gene_name "TWO";
+chr7\tncbiRefSeq\ttranscript\t100\t500\t.\t-\t.\tgene_id "TWO"; transcript_id "NM_2.2"; gene_name "TWO";
+chr7_KI270803v1_alt\tncbiRefSeq\ttranscript\t5\t50\t.\t+\t.\tgene_id "ALT"; transcript_id "NM_3.1"; gene_name "ALT";
+chr6\tncbiRefSeq\ttranscript\t1000\t2000\t.\t+\t.\tgene_id "ALT"; transcript_id "NM_3.1"; gene_name "ALT";
+chr6_GL000250v2_alt\tncbiRefSeq\ttranscript\t1\t99999\t.\t+\t.\tgene_id "ALT"; transcript_id "NM_3.1"; gene_name "ALT";
+chr6\tncbiRefSeq\texon\t1900\t2100\t.\t+\t.\tgene_id "ALT"; transcript_id "NM_3.1"; gene_name "ALT";
+chrX\tncbiRefSeq\ttranscript\t500\t799\t.\t+\t.\tgene_id "PAR1"; transcript_id "NM_4.1"; gene_name "PAR1";
+chrY\tncbiRefSeq\ttranscript\t900\t1999\t.\t+\t.\tgene_id "PAR1"; transcript_id "NM_4.1"; gene_name "PAR1";
+chrUn_KI270302v1\tncbiRefSeq\texon\t10\t40\t.\t+\t.\tgene_id "UN"; transcript_id "NM_5.1"; gene_name "UN";
+chr2\tncbiRefSeq\tCDS\t70\t90\t.\t+\t0\tgene_id "EXONLY"; transcript_id "NM_6.1"; gene_name "EXONLY";
+chr2\tncbiRefSeq\texon\t60\t95\t.\t+\t.\tgene_id "EXONLY"; transcript_id "NM_6.1"; gene_name "EXONLY";
+"""
+
+
+def test_gtf_without_gene_records_aggregates_transcripts(tmp_path):
+    path = tmp_path / "ucsc2.gtf"
+    path.write_text(UCSC_GTF_2LINE)
+    with pytest.warns(UserWarning, match="no 'gene' records"):
+        pos = gene_positions_from_gtf(path)
+    assert pos.loc["DDX11L1"].tolist() == ["1", 11874, 14409, 2536]
+
+    path = tmp_path / "ucsc.gtf.gz"
+    with gzip.open(path, "wt") as fh:
+        fh.write(UCSC_GTF)
+    with pytest.warns(UserWarning, match="spans of 6 genes"):
+        pos = gene_positions_from_gtf(path)
+    assert list(pos.columns) == ["chromosome", "start", "end", "length"]
+    assert set(pos.index) == {"DDX11L1", "TWO", "ALT", "PAR1", "UN", "EXONLY"}
+    assert pos.loc["TWO"].tolist() == ["7", 100, 900, 801]  # min start, max end over both transcripts
+    # the primary chromosome wins over alt contigs listed before and after it
+    assert pos.loc["ALT"].tolist() == ["6", 1000, 2100, 1101]
+    assert pos.loc["PAR1"].tolist() == ["X", 500, 799, 300]  # first chromosome; chrY record ignored
+    assert pos.loc["UN"].tolist() == ["Un_KI270302v1", 10, 40, 31]  # only on a contig: kept there
+    assert pos.loc["EXONLY", ["start", "end"]].tolist() == [60, 95]  # exon/CDS records only
+    pd.testing.assert_series_equal(gene_lengths(pos), pos["length"].astype(float).rename("gene_length"))
+    arms = assign_arms(pos, {"7": 5e2, "6": 5e3})
+    assert arms["TWO"] == "7p" and arms["ALT"] == "6p" and pd.isna(arms["DDX11L1"])
+
+
+def test_gtf_without_names_warns(tmp_path):
+    path = tmp_path / "ids_only.gtf"
+    path.write_text(UCSC_GTF.replace("gene_name", "gene_symbol"))
+    with pytest.warns(UserWarning, match="no record carries a gene_name"):
+        pos = gene_positions_from_gtf(path)
+    assert pos.empty and list(pos.columns) == ["chromosome", "start", "end", "length"]
+    with pytest.warns(UserWarning, match="no 'gene' records"):
+        assert gene_positions_from_gtf(path, name_attr="gene_symbol").shape[0] == 6
 
 
 def test_gene_lengths_sources():
