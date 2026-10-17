@@ -5,14 +5,17 @@ Small numerical checks written by the simulated referees during the design panel
 2026-10-16 (`specificity_fix_check.py`). They are sanity checks, not validated benchmarks. The
 TESSERA proposal ([../02_TESSERA_proposal.md](../02_TESSERA_proposal.md)) relies on their
 conclusions, so every number quoted here is in a saved `.out` file in this folder. All outputs
-were re-run or completed on 2026-10-16.
+except `ref2_invarmp_evalue_runs.out` were re-run, completed or newly produced on 2026-10-16. That
+file is the design-panel original from 2026-10-02: its seeds and replicate counts were not recorded
+and it could not be reproduced (see below). Its conclusions are backed by the re-run
+`ref2_invarmp_evalue.out`.
 
 | Script | Question | Saved output | Result |
 |---|---|---|---|
 | `ref1_check.py` | (1) Is NB thinning with one moment-matched size safe under mixtures? (2) Is a point-null "tumour expresses m" test specific? | `ref1_check.out` | (1) No: fold covariance +0.125 > 0. (2) No: "membership" in 5% / 14% / 72% / 100% of tumours at 0 / 2 / 5 / 10 of 40 genes shared with an unrelated program. kappa(m) > 0 is true for k >= 2, so this is a specificity failure of the estimand, not a type I error. |
 | `ref2_sim.py sim1` | Type I error of the cross-fold co-expression test when marginals are not NB | `ref2_sim1.out` | 0.027–0.067 with exact or moment-matched NB size; 0.83–1.00 with Poisson splitting. |
 | `ref2_sim.py sim2` | The same specificity failure with a weaker program, by number of cells; does an empirical null help? | `ref2_sim2.out`, `ref2_sim2_seed1.out`, `ref2_sim2_seed3.out` | At 8 of 40 shared genes: 28% / 50% / 89% at 300 / 1,000 / 3,000 cells (3 seeds pooled). The empirical null leaves it unchanged. |
-| `ref2_invarmp_evalue.py`, `ref2_run_one.py` | Validity and power of InvarMP's thinned split-likelihood-ratio e-value | `ref2_invarmp_evalue_runs.out`, `ref2_invarmp_evalue.out` | The e-value as specified never fired under a null but had no power at a 1.65-fold shift (it detects 2.7-fold). The plug-in variant has power but fires under the null when gene-wise capture varies. |
+| `ref2_invarmp_evalue.py`, `ref2_run_one.py` | Validity and power of InvarMP's thinned split-likelihood-ratio e-value | `ref2_invarmp_evalue_runs.out` (2026-10-02 original, not reproduced), `ref2_invarmp_evalue.out` | The e-value as specified never fired under a null but had no power at a 1.65-fold shift (it detects 2.7-fold). The plug-in variant has power but fires under the null when gene-wise capture varies. |
 | `specificity_fix_check.py` | Does the proposal's fix remove the ref1 failure? The fix is kappa conditional on the other programs, a matched-random null band and a floor of 0.05. | `specificity_fix_check.out`, `specificity_fix_check_depth.out` | Yes when the overlapping program is in the dictionary: <= 1% false membership up to 30 of 40 shared genes, with power 1.00. Without conditioning, only the floor protects, and it fails once the overlap pushes kappa above 0.05 (from 20 of 40 shared genes with the true depth). |
 
 ## ref1_check.py → `ref1_check.out`
@@ -225,6 +228,7 @@ kappa then matches theory (0.087 at k = 20, 0.199 at k = 30), and B2 false membe
 |---|---|---|---|---|---|---|
 | B2 (flat / varied) | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | **0.98 / 1.00** | 1.00 / 1.00 |
 | B1 (flat / varied) | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.01 |
+| mean null q95, B2 (flat / varied) | 0.005 / 0.015 | 0.006 / 0.015 | 0.011 / 0.016 | 0.025 / 0.015 | 0.061 / 0.012 | 0.075 / 0.007 |
 
 B1's mean kappa is between −0.001 and +0.018, so the −0.01 offset in the main run came from
 total-UMI normalisation.
@@ -233,8 +237,12 @@ total-UMI normalisation.
 - **Conditioning on the overlapping program removes the failure.** When w is in the
   dictionary, B1 has false membership <= 1% (0 of 200 at every k <= 20, and 0–2 of 200 at
   k = 30) with power 1.00. It removes the overlap signal itself: kappa is about 0 at every k.
-- **The within-tumour null band contributes nothing here.** Its q95 stays below the floor in
-  non-member tumours.
+- **The within-tumour null band contributes nothing here.** In non-member tumours its q95 stays
+  below the floor in the main run (the floor binds in 100% of replicates) and in the varied
+  true-depth run. In the flat true-depth run at k = 20 and 30 it rises above the floor (mean q95
+  0.061 and 0.075; the floor binds in only 7% and 1% of replicates). This is the flat-baseline
+  artefact described under Power: mean-matched sets are drawn from w's genes. It stays below B2's
+  kappa (0.087, 0.199), so false membership is still 0.98 and 1.00.
 - **Without conditioning, the floor kappa_min = 0.05 is the only protection.** It holds only
   while the overlap-induced kappa stays below 0.05. With a program of this strength, theory
   puts the crossing at k >= 16 of 40. The simulation fails at 20 of 40 with the true depth,
@@ -259,7 +267,7 @@ total-UMI normalisation.
 - **02 §6.3, the specificity row.** The ref1 figures (72% at 5/40, 100% at 10/40) are rejections
   of a null that is false; comparing them with a <= 5% false-membership target contrasts two
   estimands. 02 no longer makes that comparison and quotes the B1/B2 rows instead.
-- **03 (design panel record).** Referee 2's report on CALIPER (03_design_panel.md, line 1453) also
+- **03 (design panel record).** Referee 2's report on CALIPER (03_design_panel.md, line 1455) also
   states "at fold change 1.5 the 10/40 rate was 55%". No saved output backs that figure:
   `ref1_check.py` hard-codes fold change 2.5. 03 is kept as a historical record; do not cite that
   number.

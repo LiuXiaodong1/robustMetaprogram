@@ -1,6 +1,8 @@
 # Design panel: four candidate concepts and their referee reports
 
 > AI-assisted design exercise (2026-10-02). Four independent concepts were generated from different design angles, and each was critiqued by two simulated *Nature Methods* referees: novelty/prior art, and statistical rigor/feasibility. The final proposal ([02_TESSERA_proposal.md](02_TESSERA_proposal.md)) is a hybrid that responds to every fatal flaw listed here. Citations named by referees were **not** independently re-verified.
+>
+> **Erratum (2026-10-17).** This file is a frozen record of the 2026-10-02 design panel and was not revised after the 2026-10-16 review. Corrected citations are in [01](01_landscape_and_gap_analysis.md) (revision note, §2B, §4.1, §6.1) and [02](02_TESSERA_proposal.md) (§4, §6.4, §12 A2). In particular: (1) the statements here that TCAT/starCAT covers "T cells only" (lines 576 and 3133) are superseded: the TCAT catalogue is T-cell, but its authors present starCAT as generalising to other cell types and tissues; (2) Oliveira et al. 2025 profiles FFPE blocks only (Chromium Flex, Visium HD and Xenium on the same blocks; no fresh-dissociated malignant cells were found), so where the panel counts it among matched-protocol tumours, read it as a fixed-dissociated versus in situ comparison, not a fresh-versus-fixed twin; (3) the figure of 55% at fold change 1.5 in Referee 2's CALIPER report (line 1455) has no saved output behind it and must not be cited ([referee_checks/README.md](referee_checks/README.md)).
 
 ## Score summary (1–10)
 

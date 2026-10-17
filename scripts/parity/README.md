@@ -148,7 +148,9 @@ Caveats:
   several ranks); the median is a summary, not a test.
 - **What the export fixes.** Cell selection, transform, gene universe and centring are taken from
   mpaudit, so the comparison isolates the NMF solver and stopping rule. It says nothing about the
-  parts of 3CA that are not public (`Return_All_cells_Separated` cell QC); see `mpaudit/gavish.py`.
+  parts of 3CA that are not public (`Return_All_cells_Separated`: cell QC and log-normalisation).
+  The transform log2(CPM/10 + 1), with CPM over each cell's total across all genes, is inferred, not
+  matched against 3CA code; see `mpaudit/gavish.py`.
 - **Float parsing.** R's decimal parser may differ from Python's in the last bit; the input check
   allows a relative difference of 1e-9 in the matrix sum and max.
 - **Cell selection is re-implemented** in `export_matrices.py` from public functions (malignant

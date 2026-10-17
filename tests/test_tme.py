@@ -9,12 +9,15 @@ import pytest
 import mpaudit.tme as tme
 from mpaudit import Keys
 from mpaudit.scoring import control_genes
-from mpaudit.sim import simulate_cohort
+from mpaudit.sim import FIRST_MAGNITUDES, axis_magnitudes, simulate_cohort
 from mpaudit.tme import PER_SET_COLUMNS, tme_covariation
 
 KEYS = Keys(sample="sample", malignant="malignant", cell_type="cell_type", cancer_type="cancer_type", tumour="tumour")
 # 16 fresh samples: no protocol twins, whose capture bias moves every set in both compartments; 1,500 genes so
-# that few stress genes are drawn as control genes (they would put part of the stress axis into every score)
+# that few stress genes are drawn as control genes (they would put part of the stress axis into every score).
+# The technical axes are at their first magnitudes (mpaudit.sim.FIRST_MAGNITUDES): these are mechanism tests of
+# the spillover adjustment, whose planted leaks should not depend on the toy's abundance and long-gene axes
+# (at the recalibrated magnitudes the seed-0 CNA leak is a weaker noise realisation, see mpaudit.tme).
 COHORT = dict(n_tumours=16, n_twin=0, n_region=0, n_mal=100, n_tme_per_type=50, n_genes=1500, seed=0)
 SETS = ("hypoxia", "CNA_7q", "stress", "IFN", "contamination", "cycle")
 RHO_COLUMNS = ["partial_r2_rho", "slope_rho", "null_q95_rho", "null_q99_rho"]
@@ -32,7 +35,8 @@ def _not_adjusted_warnings(fn, *args, **kwargs):
 
 @lru_cache(maxsize=None)
 def _cohort(malignant_ambient: bool):
-    return simulate_cohort(**COHORT, malignant_ambient=malignant_ambient)
+    with axis_magnitudes(*FIRST_MAGNITUDES):
+        return simulate_cohort(**COHORT, malignant_ambient=malignant_ambient)
 
 
 @lru_cache(maxsize=None)

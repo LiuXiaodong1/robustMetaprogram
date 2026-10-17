@@ -6,6 +6,7 @@ import pandas as pd
 from scipy.special import comb
 from scipy.stats import pearsonr, spearmanr
 
+import mpaudit.sim as sim
 from mpaudit.coexpr import kappa
 from mpaudit.positional import assign_arms, centromeres
 from mpaudit.sim import FIB_MARKERS, MYELOID_MARKERS, RIBO, T_MARKERS, _estimate_covariates, simulate_cohort
@@ -231,8 +232,60 @@ def test_pct_ribo_tracks_abundance_axis():
                                                adata.obs["intronic_fraction"].to_numpy(), sample))
 
     (ribo_on, long_on), (ribo_off, long_off) = rho(on), rho(off)
-    assert ribo_on > 0.5 and ribo_on > ribo_off + 0.2
-    assert long_on > 0.3 and abs(long_off) < 0.15
+    # calibrated magnitudes (sim module docstring): 0.92 and 0.75 here; the first ones gave 0.75 and 0.55
+    assert ribo_on > 0.85 and ribo_on > ribo_off + 0.2
+    assert long_on > 0.65 and abs(long_off) < 0.15
+
+
+def _shared_variance(L: np.ndarray, idx) -> float:
+    """Sum over the genes ``idx`` of their mean covariance with the set's other genes (columns of
+    ``L``): the variance a factor common to the set contributes, summed over its genes."""
+    C = np.cov(L[:, idx], rowvar=False)
+    return float((C.sum() - np.trace(C)) / (len(idx) - 1))
+
+
+def test_technical_axes_rival_a_planted_program():
+    """Cheap proxy (no NMF) for the calibration target in the sim module docstring: within each
+    sample's malignant cells, each axis's shared variance in log2(CPM/10 + 1), the scale the pipeline
+    factorises, relative to that of hypoxia (robust in 13 of 16 samples of the default cohort).
+
+    Of the magnitudes tried on the default cohort, those whose ratios here fall below the bounds
+    (CYTO_GAMMA 1.75: abundance 0.68; LONG_K 10: long genes 1.28) failed the target and those above
+    them met it; the calibrated ones give 0.97 and 1.73. The first magnitudes gave 0.23 and 0.58,
+    with neither axis in any NMF program. A guard against the axes slipping back below what NMF can
+    see, not a substitute for the NMF check.
+    """
+    adata, truth = _cohort()
+    X = _dense(adata)
+    L = np.log2(_cpm(X) / 10 + 1)
+    sample, mal = adata.obs["sample"].to_numpy(), adata.obs["malignant"].to_numpy(bool)
+    sets = {name: _idx(adata, truth["sets"][name]) for name in ("hypoxia", "abundance", "long_genes")}
+    ratios = {"abundance": [], "long_genes": []}
+    for s in np.unique(sample):
+        rows = mal & (sample == s)
+        hypoxia = _shared_variance(L[rows], sets["hypoxia"])
+        for name in ratios:
+            ratios[name].append(_shared_variance(L[rows], sets[name]) / hypoxia)
+    assert np.median(ratios["abundance"]) > 0.75 and np.median(ratios["long_genes"]) > 1.4, ratios
+
+
+def test_axis_magnitudes_change_no_random_draw(monkeypatch):
+    """``CYTO_GAMMA`` and ``LONG_K`` scale planted draws without changing them: with the first
+    magnitudes every draw is as before, and the cohort without technical axes (hence the null
+    cohort) is bit-identical."""
+    on, t_on = _cohort()
+    off, _ = _cohort("technical_axes")
+    monkeypatch.setattr(sim, "CYTO_GAMMA", 1.0)
+    monkeypatch.setattr(sim, "LONG_K", 2.0)
+    first, t_first = simulate_cohort(**SMALL)
+    first_off, _ = simulate_cohort(**SMALL, technical_axes=False)
+    assert (off.layers["counts"] != first_off.layers["counts"]).nnz == 0
+    pd.testing.assert_frame_equal(off.obs, first_off.obs)
+    assert (on.layers["counts"] != first.layers["counts"]).nnz > 0  # the magnitudes do act
+    drawn = [c for c in on.obs if not c.endswith("_est")]  # the estimates are computed from the counts
+    pd.testing.assert_frame_equal(on.obs[drawn], first.obs[drawn])
+    pd.testing.assert_frame_equal(t_on["cells"], t_first["cells"])
+    assert t_on["sets"] == t_first["sets"] and t_on["private"] == t_first["private"]
 
 
 def test_capture_bias_shifts_means_not_coexpression():
@@ -244,12 +297,14 @@ def test_capture_bias_shifts_means_not_coexpression():
     lfc = np.log(_cpm(X_on)[fixed][:, ok].mean(axis=0) / _cpm(X_off)[fixed][:, ok].mean(axis=0))
     assert pearsonr(lfc, np.log(truth["capture_efficiency"].to_numpy()[ok]))[0] > 0.9
     sample = on.obs["sample"].to_numpy()
+    # The kappa difference is estimation noise (100 cells; capture redraws the counts): over seeds 0-5
+    # its mean is 0.01 and its SD 0.06 (0.045 before the technical axes were calibrated up).
     for s in np.unique(sample[fixed]):
         rows = fixed & (sample == s)
         for name in ["cycle", "hypoxia"]:
             idx = _idx(on, truth["sets"][name])
             k_on, k_off = (kappa(X[rows][:, idx], X[rows].sum(axis=1)) for X in (X_on, X_off))
-            assert k_off > 0.3 and abs(k_on - k_off) < 0.1
+            assert k_off > 0.3 and abs(k_on - k_off) < 0.15
 
 
 def test_estimated_covariates_track_truth():

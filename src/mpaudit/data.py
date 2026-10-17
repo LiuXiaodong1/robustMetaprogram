@@ -17,6 +17,7 @@ import scipy.sparse as sp
 RIBO_PATTERN = re.compile(r"^(RP[LS]\d+[A-OQ-Z]?\d?|RPL36AL|RPLP[0-2]|RPSA)$")
 MITO_PATTERN = re.compile(r"^MT-")
 QC_COLUMNS = ("log_umi", "log_genes", "pct_mito", "pct_ribo")
+LONG_GENE_BP = 100_000  # genomic span above which a gene is "long" (pct_long; the typer's frac_long_genes)
 
 
 @dataclass
@@ -75,7 +76,9 @@ def malignant_mask(adata, keys: Keys) -> np.ndarray:
 
 
 def log2_cpm10(counts: sp.spmatrix) -> sp.csr_matrix:
-    """log2(CPM/10 + 1), the 3CA transform. CPM uses each cell's total over all genes."""
+    """log2(CPM/10 + 1), inferred to be the 3CA transform (the 3CA MP code log-normalises inside
+    the private ``Return_All_cells_Separated``; see :mod:`mpaudit.gavish`). CPM uses each cell's
+    total over all genes, which is an assumption."""
     counts = sp.csr_matrix(counts, dtype=np.float64)
     totals = np.asarray(counts.sum(axis=1)).ravel()
     totals[totals == 0] = 1.0
@@ -85,41 +88,73 @@ def log2_cpm10(counts: sp.spmatrix) -> sp.csr_matrix:
     return out.tocsr()
 
 
-def qc_metrics(counts: sp.spmatrix, var_names) -> pd.DataFrame:
+def _long_genes(genes: np.ndarray, gene_length: pd.Series) -> np.ndarray:
+    """Positions in ``genes`` of the genes longer than :data:`LONG_GENE_BP` (no length: not long)."""
+    bp = pd.to_numeric(pd.Series(gene_length), errors="coerce")
+    bp.index = bp.index.astype(str)
+    bp = bp[~bp.index.duplicated()]
+    return np.flatnonzero(bp.reindex(genes).to_numpy(dtype=float) > LONG_GENE_BP)
+
+
+def qc_metrics(counts: sp.spmatrix, var_names, gene_length: pd.Series | None = None) -> pd.DataFrame:
     """Per-cell QC covariates from raw counts (cells x genes), one row per cell.
 
     ``log_umi`` = log(1 + total counts), ``log_genes`` = log(1 + detected genes); ``pct_mito`` and
     ``pct_ribo`` = percentage (0-100) of a cell's counts on mitochondrial (:data:`MITO_PATTERN`) and
-    cytoplasmic ribosomal-protein genes (:data:`RIBO_PATTERN`); 0 for cells without counts.
+    cytoplasmic ribosomal-protein genes (:data:`RIBO_PATTERN`); 0 for cells without counts. With
+    ``gene_length`` (bp, indexed by gene name, e.g. :func:`mpaudit.positional.gene_lengths`), also
+    ``pct_long``: the percentage of a cell's counts on genes longer than :data:`LONG_GENE_BP`
+    (genes without a length count as not long).
     """
     counts = sp.csr_matrix(counts, dtype=np.float64)
     genes = np.asarray(var_names, dtype=str)
     totals = np.asarray(counts.sum(axis=1)).ravel()
 
-    def pct(pattern: re.Pattern) -> np.ndarray:
-        idx = np.flatnonzero([bool(pattern.match(g)) for g in genes])
+    def pct(idx: np.ndarray) -> np.ndarray:
         return 100.0 * np.asarray(counts[:, idx].sum(axis=1)).ravel() / np.maximum(totals, 1.0)
 
-    return pd.DataFrame({"log_umi": np.log1p(totals),
-                         "log_genes": np.log1p(np.asarray((counts > 0).sum(axis=1)).ravel()),
-                         "pct_mito": pct(MITO_PATTERN), "pct_ribo": pct(RIBO_PATTERN)})
+    def matching(pattern: re.Pattern) -> np.ndarray:
+        return np.flatnonzero([bool(pattern.match(g)) for g in genes])
+
+    out = pd.DataFrame({"log_umi": np.log1p(totals),
+                        "log_genes": np.log1p(np.asarray((counts > 0).sum(axis=1)).ravel()),
+                        "pct_mito": pct(matching(MITO_PATTERN)), "pct_ribo": pct(matching(RIBO_PATTERN))})
+    if gene_length is not None:
+        out["pct_long"] = pct(_long_genes(genes, gene_length))
+    return out
 
 
-def add_qc_obs(adata, counts_layer: str | None = None, overwrite: bool = False):
+def add_qc_obs(adata, counts_layer: str | None = None, overwrite: bool = False,
+               gene_length: pd.Series | None = None):
     """Add the :func:`qc_metrics` columns to ``adata.obs`` in place and return ``adata``.
 
     Columns already in ``obs`` are kept unless ``overwrite`` is set, so repeated calls are harmless
     and an analyst's own QC values win. Warns when no gene matches the mitochondrial or ribosomal
     pattern (e.g. Ensembl IDs as ``var_names``, or mouse symbols): that column is then all zero.
+
+    ``pct_long`` is added only when gene lengths are available: ``gene_length`` (bp, indexed by
+    gene name; :func:`mpaudit.pipeline.run_p1` passes the lengths of ``positional.gtf``), else an
+    ``adata.var['gene_length']`` column. It can serve as a continuous technical decoy covariate
+    for the long-gene (nuclear/intronic) axis where no measured ``intronic_fraction`` exists; it is
+    in no decoy arm by default. Caveat (as for ``pct_ribo``; see :mod:`mpaudit.decoy`): it is
+    computed from counts that include an audited MP's own long genes, so a decoy conditioned on it
+    keeps part of a long-gene MP's sampling noise as co-expression and can inflate that MP's
+    ``kappa_retained``.
     """
-    todo = [c for c in QC_COLUMNS if overwrite or c not in adata.obs]
+    if gene_length is None and "gene_length" in adata.var:
+        gene_length = pd.Series(adata.var["gene_length"].to_numpy(), index=adata.var_names.astype(str))
+    columns = QC_COLUMNS + (("pct_long",) if gene_length is not None else ())
+    todo = [c for c in columns if overwrite or c not in adata.obs]
     if not todo:
         return adata
     genes = adata.var_names.astype(str)
     for col, pattern in (("pct_mito", MITO_PATTERN), ("pct_ribo", RIBO_PATTERN)):
         if col in todo and not any(pattern.match(g) for g in genes):
             warnings.warn(f"no gene matches {pattern.pattern!r}; {col} is 0 for every cell", stacklevel=2)
-    qc = qc_metrics(get_counts(adata, counts_layer), genes)
+    qc = qc_metrics(get_counts(adata, counts_layer), genes, gene_length=gene_length)
+    if "pct_long" in todo and not (qc["pct_long"] > 0).any():
+        warnings.warn(f"no counts on genes longer than {LONG_GENE_BP} bp with a known length; pct_long is 0 for "
+                      "every cell (do the gene lengths match var_names?)", stacklevel=2)
     for col in todo:
         adata.obs[col] = qc[col].to_numpy()
     return adata
@@ -164,7 +199,9 @@ def load_3ca_study(path: str | Path):
     (``*UMIcounts*.mtx`` preferred, otherwise any ``*.mtx``), ``Genes.txt`` (one gene per line)
     and ``Cells.csv`` (one row per cell; first column the cell name). Orientation of the matrix
     is inferred from the gene and cell counts. Smart-seq studies ship TPM rather than counts;
-    those are loaded as-is and flagged in ``uns['3ca_value_type']``.
+    those are loaded as-is and flagged in ``uns['3ca_value_type']``. The folders hold gene-level
+    counts only: no spliced/unspliced or intronic information, so a per-cell intronic fraction
+    needs the raw reads re-processed (e.g. STARsolo Velocyto, velocyto, DropletQC).
     """
     import anndata as ad
     from scipy.io import mmread

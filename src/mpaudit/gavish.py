@@ -5,14 +5,15 @@ its fields when constructed: unknown option names and values raise ``ValueError`
 given as strings, as PyYAML reads ``1e-8``, are converted):
 
 1. Per sample, malignant cells with >= ``min_genes_per_cell`` detected genes [1,000]:
-   log2(CPM/10 + 1); keep the top genes by mean expression [7,000]; centre each gene; set
-   negatives to zero; drop genes and cells left all zero (R ``Process_mat``,
-   ``MP_analysis_new_batch.R:95-106``; NMF cannot fit them).
+   log2(CPM/10 + 1) (inferred: the R code log-normalises upstream of ``Process_mat``, inside the
+   private ``Return_All_cells_Separated``; see below); then, as in R ``Process_mat``
+   (``MP_analysis_new_batch.R:95-106``): keep the top genes by mean expression [7,000]; centre each
+   gene; set negatives to zero; drop genes and cells left all zero (NMF cannot fit them).
 2. sNMF/R at each rank [4-9], keeping the best of ``nrun`` restarts [10]; each program is
    summarised by its top genes [50]. All-zero basis columns (dead components) are skipped, so
    they never enter the program filters (counted in ``GavishResult.n_dead_programs``). Runs
    stopped by the iteration cap or by the restart limit are counted (``n_capped_fits``,
-   ``n_failed_fits``).
+   ``n_failed_fits``); :func:`mpaudit.pipeline.run_p1` reports the counts per run (below).
 3. Robust programs: overlap >= ``intra_min`` [35] with another program of the same sample;
    max overlap >= ``inter_min`` [10] with a program from another sample; greedy within-sample
    redundancy pruning at ``intra_max`` [10].
@@ -31,7 +32,10 @@ and renozao/NMF (``R/algorithms-snmf.R``). Remaining differences:
   R tests assignment stability plus a KKT residual every 5 iterations, capped at 20,000. Fits
   that stop at the cap are counted in ``GavishResult.n_capped_fits``, and fits stopped by the
   restart limit (all-zero rows of ``H``; R also warns and stops) in ``n_failed_fits`` (per sample
-  and rank in ``SamplePrograms.fits``). On the toy cohort the tolerance binds long before the
+  and rank in ``SamplePrograms.fits``). The P1 run reports them for the reference run, each decoy
+  cohort (``decoy_runs.csv``) and each instability perturbation (``instability_runs.csv``), with
+  totals in ``run_config.json`` (``nmf_fits``) and one line in ``summary.md``, and warns when a fit
+  was stopped by the restart limit. On the toy cohort the tolerance binds long before the
   cap, and at ``tol=1e-5`` the port stopped about 5x earlier than R's rule would, with top-50
   lists not yet stable; the default is therefore ``tol=1e-7`` (numbers in :mod:`mpaudit.nmf`).
   Parity runs against R use ``tol=1e-8`` (``gavish.tol: 1.0e-8``; see ``scripts/parity``).
@@ -61,8 +65,13 @@ and renozao/NMF (``R/algorithms-snmf.R``). Remaining differences:
   sample name is a substring of another).
 * Founder ties follow an average-linkage dendrogram reordered by column means, as in the R code,
   but scipy's linkage can break exact distance ties differently from R's ``hclust``.
-* The cell filter (>= 1,000 detected genes) is inferred from other 3CA scripts; the cell-QC
-  function the MP script calls (``Return_All_cells_Separated``) is not public.
+* The cell filter (>= 1,000 detected genes) and the transform log2(CPM/10 + 1), with CPM over
+  each cell's total across all genes, are inferred. The function the MP script calls
+  (``Return_All_cells_Separated(..., log_normalize = TRUE)``, ``MP_analysis_new_batch.R:111``)
+  does cell QC and log-normalisation and is not public. The filter comes from other 3CA scripts;
+  the transform from the commented-out ``MP_analysis_new_batch.R:99`` and from
+  ``MPs_distribution/MP_distribution.R:47`` (a scoring script); the CPM denominator is an
+  assumption.
 * The R code upper-cases gene symbols; this port keeps ``var_names`` as given (only matters when
   comparing against gene lists with different capitalisation).
 * The 3CA v2 manual removal of 11 MPs cannot be reproduced; label those MPs instead
@@ -321,7 +330,8 @@ def _universe_index(L: sp.csr_matrix, params: GavishParams) -> np.ndarray:
 
 
 def prepare_matrix(counts: sp.spmatrix, genes: np.ndarray, params: GavishParams) -> tuple[np.ndarray, np.ndarray]:
-    """3CA per-sample matrix (R ``Process_mat``): genes x cells, log2(CPM/10+1), top genes, centred,
+    """3CA per-sample matrix: genes x cells, log2(CPM/10+1) (inferred; done upstream of R
+    ``Process_mat``, see the module docstring), then as in R ``Process_mat``: top genes, centred,
     negatives zeroed, all-zero genes and cells dropped. Returns ``(A, universe)``, ``universe``
     naming the rows of ``A``."""
     L = log2_cpm10(counts)
@@ -375,34 +385,56 @@ CACHE_FORMAT = 2
 # Hash of the code that determines a cached fit; part of every NMFCache key. Computed on first use
 # (the package version is defined after this module is imported); tests may monkeypatch it.
 CODE_VERSION: str | None = None
+# Hash of the code that generates decoy counts, added to the key of fits on decoy data (data tags
+# starting with DECOY_TAG, as mpaudit.decoy builds them). Computed on first use, like CODE_VERSION.
+DECOY_CODE_VERSION: str | None = None
+DECOY_TAG = "decoy-"
+# The functions that turn a cohort into decoy counts: make_decoy and everything of mpaudit it calls.
+DECOY_SOURCES = ("decoy.make_decoy", "decoy._is_continuous", "decoy._covariates", "decoy._strata",
+                 "decoy._permute_within", "decoy._scrp_block", "decoy._glm_mean", "decoy._nb_dispersion",
+                 "data.get_counts", "data.malignant_mask")
 
 
-def code_version() -> str:
-    """Hash of the package version, :data:`CACHE_FORMAT` and the sources that shape a cached
-    fit: :mod:`mpaudit.nmf`, :func:`prepare_matrix` (with :func:`_universe_index`), :func:`_fit_job`,
-    :func:`_fit_summary` (the cached fit diagnostics), :func:`_rank_seeds`,
-    :func:`mpaudit.data.log2_cpm10` and :mod:`mpaudit.decoy` (decoy code changes the decoy
-    inputs). Editing any of them invalidates an on-disk cache instead of silently serving old fits
-    or old diagnostics.
+def code_version(decoy_data: bool = False) -> str:
+    """Hash of the code behind a cached fit.
+
+    For fits on real data: the package version, :data:`CACHE_FORMAT` and the sources that shape a
+    cached fit, i.e. :mod:`mpaudit.nmf`, :func:`prepare_matrix` (with :func:`_universe_index`),
+    :func:`_fit_job`, :func:`_fit_summary` (the cached fit diagnostics), :func:`_rank_seeds` and
+    :func:`mpaudit.data.log2_cpm10`. With ``decoy_data``, also the functions that generate the
+    decoy counts (:data:`DECOY_SOURCES`: :func:`mpaudit.decoy.make_decoy` and every helper of the
+    package it calls; their docstrings included). Editing any of them invalidates an on-disk cache
+    instead of silently serving old fits or old diagnostics. Editing anything else in
+    :mod:`mpaudit.decoy` (its module docstring, :func:`~mpaudit.decoy.decoy_recruitment`,
+    ``kappa_retained``) leaves every key unchanged, and editing the decoy generator leaves the keys
+    of fits on real data unchanged.
     """
-    global CODE_VERSION
+    global CODE_VERSION, DECOY_CODE_VERSION
     if CODE_VERSION is None:
-        from . import __version__, data, decoy, nmf
+        from . import __version__, data, nmf
         sources = [__version__, f"cache-format-{CACHE_FORMAT}", inspect.getsource(nmf),
                    inspect.getsource(prepare_matrix), inspect.getsource(_universe_index),
                    inspect.getsource(_fit_job), inspect.getsource(_fit_summary), inspect.getsource(_rank_seeds),
-                   inspect.getsource(data.log2_cpm10), inspect.getsource(decoy)]
+                   inspect.getsource(data.log2_cpm10)]
         CODE_VERSION = hashlib.sha1("\x1e".join(sources).encode()).hexdigest()[:16]
-    return CODE_VERSION
+    if not decoy_data:
+        return CODE_VERSION
+    if DECOY_CODE_VERSION is None:
+        from . import data, decoy
+        modules = {"data": data, "decoy": decoy}
+        sources = [inspect.getsource(getattr(modules[m], f)) for m, f in (s.split(".") for s in DECOY_SOURCES)]
+        DECOY_CODE_VERSION = hashlib.sha1("\x1e".join(sources).encode()).hexdigest()[:16]
+    return hashlib.sha1(f"{CODE_VERSION}\x1e{DECOY_CODE_VERSION}".encode()).hexdigest()[:16]
 
 
 class NMFCache:
     """Caches per-(sample, rank) NMF bases and fit diagnostics, in memory or (when ``directory``
     is set) on disk.
 
-    The key covers everything that changes the fit: the code version (:func:`code_version`), a
-    fingerprint of the input (cell barcodes, gene names, counts layer, total counts), a data tag
-    (real or decoy), the gene universe, centring, solver settings and seed. Threshold, clustering
+    The key covers everything that changes the fit: the code version (:func:`code_version`; for
+    data tags starting with :data:`DECOY_TAG` it includes the decoy generator), a fingerprint of
+    the input (cell barcodes, gene names, counts layer, total counts), a data tag (real or decoy),
+    the gene universe, centring, solver settings and seed. Threshold, clustering
     and leave-study-out perturbations therefore reuse fits; a cache directory cannot serve fits
     from a different dataset or from older code. With a directory, fits are not also kept in
     memory (atlas-scale runs would not fit).
@@ -416,8 +448,8 @@ class NMFCache:
 
     @staticmethod
     def key(data_tag: str, fingerprint: str, sample: str, rank: int, p: GavishParams) -> str:
-        parts = (code_version(), data_tag, fingerprint, sample, rank, p.gene_universe, p.n_universe, p.center,
-                 p.nrun, p.seed, p.beta, p.eta, p.max_iter, p.tol)
+        parts = (code_version(decoy_data=data_tag.startswith(DECOY_TAG)), data_tag, fingerprint, sample, rank,
+                 p.gene_universe, p.n_universe, p.center, p.nrun, p.seed, p.beta, p.eta, p.max_iter, p.tol)
         return hashlib.sha1(repr(parts).encode()).hexdigest()
 
     def get(self, key: str) -> tuple[np.ndarray, np.ndarray, dict] | None:

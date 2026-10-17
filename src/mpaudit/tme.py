@@ -1,7 +1,9 @@
 """Pilot P1c / axis A1: does an MP co-vary with the same genes in co-resident TME cells?
 
 Non-malignant cells from the same sample share dissociation and ischaemia time, RNA quality and
-capture with the malignant cells, but not malignant programs. Two statistics per MP:
+capture with the malignant cells. They do not express malignant programs, but they carry them as
+malignant-derived ambient RNA (see Spillover below), which this module subtracts. Two statistics
+per MP:
 
 * ``partial_r2``: across samples, the share of variance in the per-sample malignant MP score
   explained by the same gene set's TME score, beyond cancer type (and optionally study), after
@@ -17,11 +19,13 @@ capture with the malignant cells, but not malignant programs. Two statistics per
   above: the same genes co-vary in TME cells too (technical or niche-wide). Groups larger than
   ``max_kappa_cells`` are subsampled at random (own random stream, so the result does not depend
   on ``n_null`` or ``n_boot``). Not adjusted for spillover: varying ambient fractions add
-  co-expression of the leaked genes in TME cells, so a malignant program can raise it.
+  co-expression of the leaked genes in TME cells, so a malignant program can raise it. It is
+  informational: the P1 rule does not use it.
 
-**Spillover.** Most ambient RNA in a tumour suspension comes from malignant cells, so a malignant
-program whose strength varies between samples leaks into the same samples' TME cells and makes
-their score follow the malignant one with no TME biology at all. With ``spillover_adjust``:
+**Spillover.** In malignant-rich tumour suspensions much of the ambient RNA is likely to come from
+malignant cells (not quantified here), so a malignant program whose strength varies between
+samples leaks into the same samples' TME cells and makes their score follow the malignant one with
+no TME biology at all. With ``spillover_adjust``:
 
 1. Markers: the ``n_markers`` genes with the highest ratio of malignant to TME mean CPM
    (cohort-wide; TME = the TME cell type with the highest mean, so a marker is low in every TME
@@ -29,9 +33,10 @@ their score follow the malignant one with no TME biology at all. With ``spillove
    ``exclude_genes`` (default: the genes of all audited sets, so no MP calibrates its own leak).
    Ambient RNA caps this ratio: a TME type holding a fraction ``rho`` of malignant RNA expresses
    every malignant gene at least at ``rho`` times its malignant level, so no gene exceeds about
-   ``1 / rho``-fold (toy cohort below, 5% mean ambient: the planted lineage markers reach 11.6-15.8
-   fold). A TME type averaging ``rho`` above about ``1 / min_marker_fold``, or one that shares the
-   malignant lineage genes (e.g. normal epithelium next to a carcinoma), leaves too few markers.
+   ``1 / rho``-fold (toy cohort of 16 fresh samples below, 5% mean ambient: the planted lineage
+   markers reach 11.9-16.2 fold). A TME type averaging ``rho`` above about
+   ``1 / min_marker_fold``, or one that shares the malignant lineage genes (e.g. normal epithelium
+   next to a carcinoma), leaves too few markers.
    With fewer than ``MIN_MARKERS`` markers the adjustment is skipped with a warning
    (``spill_adjusted`` False; ``partial_r2`` and ``slope`` are then the unadjusted statistic, not
    the spillover-adjusted one that criterion (b) of the P1 GO rule is defined on).
@@ -52,15 +57,18 @@ i.e. of the response itself. As a covariate with a free coefficient in the reduc
 it absorbs the malignant score wherever a program varies more between samples than ``rho`` does,
 and conditioning on it (a common effect of the malignant score and ``rho``) links any
 ``rho``-dependent TME score to the malignant score. On toy cohorts (16 fresh samples with 80
-malignant and 3 x 40 TME cells, 1,000 genes; seeds 0-2) the covariate version removed the genuine
+malignant and 3 x 40 TME cells, 1,000 genes; seeds 0-2; first magnitudes, see the end of this
+docstring) the covariate version removed the genuine
 IFN co-variation (0.09-0.20, below null q99 in all three), left stress below q99 once and pushed
 the contamination set (TME markers, diluted by malignant ambient) above q99 twice; subtraction kept
 IFN (0.63-0.86) and stress (0.80-0.92) above q99, left hypoxia at 0.03-0.04 and never flagged
-contamination. On the default toy cohort the CNA set (malignant only, 70% of tumours) drops from
-0.60 unadjusted to 0.07. Malignant-only sets (hypoxia, cycle, EMT, CNA) have observed TME scores
-that regress on their spill score with slope 0.8-1.3 (medians over seeds), i.e. the prediction is
-roughly calibrated. The price: subtraction relies on the absolute size of ``rho_hat``. Native TME
-expression of the markers biases it up (toy: 1.0-1.4 times the planted fraction), which
+contamination. On the default toy cohort (seed 0) the CNA set (malignant only, 70% of tumours)
+drops from 0.18 unadjusted to 0.08 with a negative slope, and hypoxia from 0.49 to 0.11. On the
+16-fresh-sample cohort (1,500 genes, seeds 0-2), malignant-only sets (hypoxia, cycle, EMT, CNA) have
+observed TME scores that regress on their spill score with slope 0.5-1.3 (medians over the seeds),
+i.e. the prediction is roughly calibrated. The price: subtraction relies on the absolute size of
+``rho_hat``. Native TME expression of the markers biases it up (same cohort: 1.2-1.3 times the
+planted fraction, medians per TME cell type), which
 over-subtracts (a pure leak then gets a negative slope, which does not count); a ``rho_hat``
 biased down leaves part of the leak in the TME score.
 
@@ -72,13 +80,16 @@ random sets and control genes: ``partial_r2_rho``, ``slope_rho``, ``null_q95_rho
 ``null_q99_rho`` (NaN when spillover is not adjusted or ``rho_sensitivity`` is None or 1). An
 association that exceeds q99 only because ``rho_hat`` is too small falls back at the larger
 ``rho_hat``; co-variation that both compartments share natively hardly moves. Toy cohort (16 fresh
-samples, 1,500 genes, seed 0, 200 null sets), with every ``rho_hat`` multiplied by 0.7 to mimic an
-estimate biased down: CNA_7q (malignant only) rises from 0.15 to 0.41 against null q99 0.27, while
-at 1.5 times that ``rho_hat`` it is 0.11 against ``null_q99_rho`` 0.23; stress (0.96) and IFN
-(0.85) stay above both. The re-run covers a ``rho_hat`` biased down by up to about
+samples, 1,500 genes, seed 0, 200 null sets; first magnitudes), with every ``rho_hat`` multiplied
+by 0.7 to mimic an estimate biased down: CNA_7q (malignant only) rises from 0.15 to 0.41 against
+null q99 0.27, while at 1.5 times that ``rho_hat`` it is 0.11 against ``null_q99_rho`` 0.23; stress
+(0.96) and IFN (0.85) stay above both. The re-run covers a ``rho_hat`` biased down by up to about
 ``1 / rho_sensitivity`` (with 0.5 times ``rho_hat``, CNA_7q is still 0.37 against 0.27 at 1.5
-times that). The price is over-subtraction where ``rho_hat`` is already biased up, which can push
-weak genuine co-variation of a program that varies strongly in malignant cells below its null.
+times that). At the calibrated magnitudes the CNA leak on this cohort is smaller (unadjusted
+partial R^2 0.07-0.53 over seeds 0-4), and at 0.7 or 0.5 times ``rho_hat`` CNA_7q stays below null
+q99 at all five seeds, so the current toy does not exercise the re-run. The price is
+over-subtraction where ``rho_hat`` is already biased up, which can push weak genuine co-variation
+of a program that varies strongly in malignant cells below its null.
 
 **Null.** ``null_q95``, ``null_q99`` and ``null_p`` come from ``n_null`` random gene sets matched
 gene by gene on expression (``n_bins`` bins of malignant mean log expression) and, with
@@ -93,21 +104,22 @@ about the same per-gene exposure to spillover as the MP's genes, but it does not
 absorb an error of the subtraction: a random set has none of the between-sample variation of a real
 program in malignant cells, so a leak left over by a ``rho_hat`` biased down barely correlates its
 two scores, whereas for a program that varies strongly between samples it does. In the toy run
-above (``rho_hat`` times 0.7), CNA_7q's partial R^2 rose from 0.15 to 0.41 but its null q99 only
-from 0.24 to 0.27. Finer specificity bins do not address this (they refine per-gene exposure, not
-program-level variation; with 20 bins CNA_7q is still above null q99); hence the
-``rho_sensitivity`` re-run.
+above (``rho_hat`` times 0.7, first magnitudes), CNA_7q's partial R^2 rose from 0.15 to 0.41 but
+its null q99 only from 0.24 to 0.27. Finer specificity bins do not address this (they refine
+per-gene exposure, not program-level variation; with 20 bins CNA_7q is still above null q99);
+hence the ``rho_sensitivity`` re-run.
 Partial R^2 with ``slope <= 0`` counts as 0, for null sets and for ``null_p`` =
 (1 + #{null >= observed}) / (1 + number of null sets).
 
-**Use in the P1 GO rule** (``P1-GO v1.1`` in :mod:`mpaudit.report`, criterion b): only a positive
+**Use in the P1 GO rule** (``P1-GO v1.2`` in :mod:`mpaudit.report`, criterion b): only a positive
 association (``slope > 0``) with ``partial_r2 > null_q99`` counts, and no fixed R^2 threshold.
 A shared technical or niche-wide factor moves both compartments the same way; a negative
 association has no nuisance reading (competition for reads, over-subtracted spillover). A fixed
-bar is not interpretable: on the default toy cohort (16 samples, 4 under the fixed protocol) the
-random-set null has q95 0.5-0.8 and q99 0.7-0.9, because protocol-specific capture and stress
-genes among the control genes move every set in both compartments; with 16 fresh samples and
-1,500 genes q95 is 0.1-0.45. q99 rather than q95 because the rule screens dozens of MPs and the
+bar is not interpretable: on the default toy cohort (16 samples, 4 under the fixed protocol; seed
+0, 500 sets) the random-set null has q95 0.46-0.78 and q99 0.63-0.86 per audited set, because
+protocol-specific capture and stress genes among the control genes move every set in both
+compartments; with 16 fresh samples and 1,500 genes (seed 0, 200 sets) q95 is 0.19-0.27. q99
+rather than q95 because the rule screens dozens of MPs and the
 random-set null is approximate. IFN response and hypoxia can be genuinely TME-shared biology, so
 MPs on the pre-declared expected-TME-shared list cannot count through this criterion. The rule is
 defined on the spillover-adjusted statistic, i.e. on rows with ``spill_adjusted`` True. The
@@ -128,6 +140,13 @@ sample-level effects, not every way a strong program can correlate with noise.
 Scores are linear in (log) group-mean profiles, which are computed once, as are the expected
 spillover profiles (a second set at the scaled ``rho_hat`` for ``rho_sensitivity``); the
 random-set null is therefore cheap even at atlas scale.
+
+Toy figures are true by construction (:mod:`mpaudit.sim`). Those marked "first magnitudes" were
+measured before the toy's technical axes were recalibrated (2026-10-17) and reproduce with
+``mpaudit.sim.axis_magnitudes(*mpaudit.sim.FIRST_MAGNITUDES)`` (``CYTO_GAMMA = 1.0``,
+``LONG_K = 2.0``; every random draw is the same); the spillover and ``rho_hat`` sensitivity tests in
+``tests/test_tme.py`` use the 16-fresh-sample cohort at these magnitudes. The others come from the
+calibrated toy.
 """
 from __future__ import annotations
 

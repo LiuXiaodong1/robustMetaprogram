@@ -47,7 +47,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .data import MITO_PATTERN, RIBO_PATTERN, Keys, get_counts, log2_cpm10, malignant_mask, qc_metrics
+from .data import LONG_GENE_BP, MITO_PATTERN, RIBO_PATTERN, Keys, get_counts, log2_cpm10, malignant_mask, qc_metrics
 from .positional import gene_lengths
 from .scoring import score_gene_sets
 
@@ -57,7 +57,6 @@ IEG_HSP_CORE = ["FOS", "FOSB", "JUN", "JUNB", "JUND", "EGR1", "EGR2", "EGR3", "A
 TME_MARKERS_CORE = ["PTPRC", "CD3D", "CD3E", "CD2", "NKG7", "GZMA", "CD79A", "MS4A1", "LYZ", "CD68",
                     "CD14", "C1QA", "C1QB", "TYROBP", "FCER1G", "AIF1", "PECAM1", "VWF", "CDH5",
                     "CLDN5", "COL1A1", "COL1A2", "COL3A1", "DCN", "LUM", "HBB", "HBA1", "HBA2"]
-LONG_GENE_BP = 100_000
 MIN_CELLS_COR = 20
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import warnings
 from pathlib import Path
 
 
@@ -40,8 +41,12 @@ def main(argv=None) -> None:
         cfg = _load_config(args.config)
         if args.n_jobs:
             cfg["n_jobs"] = args.n_jobs
-        try:  # fail on a bad config before reading the cohort; run_p1 checks again against its obs columns
-            validate_config(merge_config(copy.deepcopy(cfg)), log=lambda *a: None)
+        # fail on a bad config, or one that deviates from the registered rule without unregistered_variant,
+        # before reading the cohort; run_p1 checks again against its obs columns and gives the warnings
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                validate_config(merge_config(copy.deepcopy(cfg)), log=lambda *a: None)
         except ValueError as e:
             ap.error(f"config {args.config}: {e}")
         run_p1(ad.read_h5ad(args.h5ad), cfg, args.out)

@@ -154,14 +154,68 @@ def test_cache_key_includes_code_version(monkeypatch):
     assert NMFCache.key("data", "fp", "s", 4, p) != k0
 
 
-@pytest.mark.parametrize("target", [nmf, decoy, data.log2_cpm10, prepare_matrix, gavish._fit_job,
-                                    gavish._fit_summary])
-def test_code_version_covers_fit_sources(monkeypatch, target):
-    v0 = gavish.code_version()
+def _edit_source(monkeypatch, target):
+    """Make inspect.getsource report ``target`` as edited, and drop the cached code versions."""
     real = inspect.getsource
     monkeypatch.setattr(gavish, "CODE_VERSION", None)
+    monkeypatch.setattr(gavish, "DECOY_CODE_VERSION", None)
     monkeypatch.setattr(inspect, "getsource", lambda obj: real(obj) + ("\n# edit" if obj is target else ""))
-    assert gavish.code_version() != v0
+
+
+@pytest.mark.parametrize("target", [nmf, data.log2_cpm10, prepare_matrix, gavish._fit_job, gavish._fit_summary])
+def test_code_version_covers_fit_sources(monkeypatch, target):
+    v0, d0 = gavish.code_version(), gavish.code_version(decoy_data=True)
+    _edit_source(monkeypatch, target)
+    assert gavish.code_version() != v0 and gavish.code_version(decoy_data=True) != d0  # decoy fits too
+
+
+REAL_TAG, DECOY_TAG = "data", "decoy-residual-clone_est-d1-s1000"
+
+
+@pytest.mark.parametrize("target", [decoy.decoy_recruitment, decoy.kappa_retained, decoy._reference_kappa, decoy])
+def test_editing_decoy_recruitment_changes_no_cache_key(monkeypatch, target):
+    # e.g. a docstring edit in decoy.py outside the decoy generator: no fit, real or decoy, is refitted
+    p = GavishParams()
+    keys0 = [NMFCache.key(tag, "fp", "s", 4, p) for tag in (REAL_TAG, DECOY_TAG)]
+    _edit_source(monkeypatch, target)
+    assert [NMFCache.key(tag, "fp", "s", 4, p) for tag in (REAL_TAG, DECOY_TAG)] == keys0
+
+
+@pytest.mark.parametrize("target", [decoy.make_decoy, decoy._glm_mean, decoy._scrp_block, decoy._strata,
+                                    data.malignant_mask])
+def test_editing_the_decoy_generator_changes_only_decoy_keys(monkeypatch, target):
+    p = GavishParams()
+    real0, decoy0 = NMFCache.key(REAL_TAG, "fp", "s", 4, p), NMFCache.key(DECOY_TAG, "fp", "s", 4, p)
+    assert real0 != decoy0 and gavish.code_version(decoy_data=True) != gavish.code_version()
+    _edit_source(monkeypatch, target)
+    assert NMFCache.key(REAL_TAG, "fp", "s", 4, p) == real0   # fits on real data are still served
+    assert NMFCache.key(DECOY_TAG, "fp", "s", 4, p) != decoy0
+
+
+def _package_functions_reached(fn) -> set:
+    """Functions of mpaudit that ``fn`` calls, directly or through each other (globals named in its
+    code and in the code of functions nested in it)."""
+    seen, todo = set(), [fn]
+    while todo:
+        f = todo.pop()
+        codes = [f.__code__]
+        names = set()
+        while codes:
+            c = codes.pop()
+            names |= set(c.co_names)
+            codes += [k for k in c.co_consts if inspect.iscode(k)]
+        for name in names:
+            obj = f.__globals__.get(name)
+            if inspect.isfunction(obj) and obj.__module__.startswith("mpaudit") and obj not in seen:
+                seen.add(obj)
+                todo.append(obj)
+    return seen
+
+
+def test_decoy_sources_are_everything_make_decoy_reaches():
+    modules = {"data": data, "decoy": decoy}
+    hashed = {getattr(modules[m], f) for m, f in (s.split(".") for s in gavish.DECOY_SOURCES)}
+    assert hashed == _package_functions_reached(decoy.make_decoy) | {decoy.make_decoy}
 
 
 def test_code_version_covers_cache_format(monkeypatch):
@@ -360,6 +414,7 @@ def test_method_variants_stay_out_of_recovery_all(monkeypatch):
     assert (row["recovery_all"], row["recovery_seed"], row["recovery_method_variant"]) == (1.0, 1.0, 0.0)
     assert row["median_best_jaccard"] == 1.0 and (res.genes["frequency"] == 1.0).all()
     assert list(res.summary["kind"]) == ["seed", "method_variant"]
+    assert {"n_fits", "n_capped_fits", "n_failed_fits"} <= set(res.summary.columns)  # fit diagnostics per run
 
     res = run_instability(None, Keys(), GavishParams(), perts[:1], log=lambda *_: None)
     assert np.isnan(res.per_mp.iloc[0]["recovery_method_variant"])

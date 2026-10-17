@@ -25,7 +25,13 @@ with Jaccard >= ``min_jaccard`` to it and ``recruitment = hits / n_decoys``; one
 decoys is not evidence (the P1 rule in :mod:`mpaudit.report` asks for >= 2 hits among >= 5
 decoys). Reporting per arm types the recruitment: an arm of inferred CNA clones recruiting an MP
 marks it **dosage** (genetic, not technical nuisance); an arm of technical covariates (doublet
-score, ambient-contamination estimate, %ribo, intronic fraction) marks it **nuisance**.
+score, ambient-contamination estimate, %ribo, intronic fraction) marks it **nuisance**. Recruitment
+is reported per arm, not per covariate. The example config conditions on the four technical
+covariates jointly in one arm, because each arm costs ``n_decoys`` (5) more pipeline passes, so a
+technical hit is not attributed to a single covariate. To attribute it (e.g. to see whether
+``doublet_est``, which tracks cell size and cycling, drives a hit), declare one arm per covariate
+and list each in ``decision.technical_arms``. Criterion (a) then counts a hit in any of them, which
+adds chances to hit, so fix the arm list in the registered config before running.
 
 **kappa_retained.** A decoy reproduces an MP to the extent that the declared nuisance explains
 the MP's co-expression. Per MP, arm, decoy and malignant sample with >= ``min_cells`` cells, the
@@ -37,32 +43,41 @@ qualifies: a sample where the MP is not co-expressed says nothing about what nui
 "Co-expressed" means ``kappa_real`` above both ``min_kappa`` [0.02] and the 95th percentile of
 ``n_null_floor`` [20] random gene sets matched on mean expression and detection in that sample
 (:func:`mpaudit.coexpr.matched_random_sets`); with a fixed floor alone, samples where the MP is
-inactive (kappa_real at the random-set level, 0.04-0.10 on the toy) would put noise ratios into the
-median. It is not clipped: noise moves single ratios below 0 or above 1, and see below for
-systematic ratios above 1.
+inactive (kappa_real at the random-set level: 0.09-0.24 for EMT and IFN in samples of tumours that
+lack them, on the toy cohort below) would put noise ratios into the median. It is not clipped:
+noise moves single ratios below 0 or above 1, and see below for systematic ratios above 1.
 
-**Caveat: covariates computed from expression.** Doublet scores, contamination estimates and
-inferred clones are computed from the same counts. A decoy conditioned on one keeps whatever
-co-expression the covariate predicts, including that of a *real* program correlated with it:
-cycling cells are larger and get higher doublet scores, so a doublet arm keeps part of the cycle
-program, and with enough cells NMF can find that part in decoys. Recruitment alone would then call
-real biology nuisance; ``kappa_retained`` grades how much of the co-expression the covariate
-explains. On the toy cohort (:func:`mpaudit.sim.simulate_cohort`, seed 0, one decoy per arm,
-median over 16 samples) an arm on the planted doublet score (cycling cells score 0.3 higher;
-within-sample Spearman 0.61 with cycling) keeps 0.37 of the cycle program's kappa, an arm on the
-expression-based ``doublet_est`` (Spearman 0.27) about 0.01; ``clone_est`` keeps 0.84-0.88 of the
-CNA set's kappa and ``contamination_est`` 1.27-1.32 of the contamination set's. Two limits remain:
+**Caveat: covariates computed from expression.** Doublet scores, contamination estimates, %ribo,
+``pct_long``, the intronic fraction and inferred clones are computed from the same counts (the
+intronic fraction from the same reads). A decoy conditioned on one keeps whatever co-expression the
+covariate predicts, including that of a *real* program correlated with it: cycling cells are larger
+and get higher doublet scores, so a doublet arm keeps part of the cycle program, and with enough
+cells NMF can find that part in decoys; %ribo tracks translation, ribosome biogenesis and MYC
+activity, so an arm on it keeps such programs, and an MP containing ribosomal-protein genes shares
+counts with %ribo. Recruitment alone would then call real biology nuisance; ``kappa_retained``
+grades how much of the co-expression the covariate explains. On the toy cohort
+(:func:`mpaudit.sim.simulate_cohort`, seed 0, two decoys per arm, median over 16 samples) an arm on
+the planted doublet score (cycling cells score 0.3 higher; within-sample Spearman 0.61 with
+cycling) keeps 0.35-0.38 of the cycle program's kappa, an arm on the expression-based
+``doublet_est`` (Spearman 0.26) about 0.01; ``clone_est`` keeps 0.79-0.82 of the CNA set's kappa and
+``contamination_est`` 1.40-1.42 of the contamination set's. An arm on ``pct_ribo`` keeps 0.88 of the
+abundance set's kappa, and 0.10-0.21 of cycle, hypoxia and CNA, because on the toy %ribo also moves
+every gene through a shared per-cell dilution; the four-covariate technical arm of the demo keeps
+0.12-0.24 of those three. Two limits remain:
 
 * a real program strongly tied to a covariate's estimator (cell size and the doublet score, a
-  transcriptional state that an expression-based clone caller splits on) keeps most of its kappa
-  and cannot be told from nuisance here; only covariates measured independently of expression
+  transcriptional state that an expression-based clone caller splits on, translation and %ribo)
+  keeps most of its kappa and cannot be told from nuisance here; if the decoys recruit it, it counts
+  as nuisance support under criterion (a). Only covariates measured independently of expression
   (genotype demultiplexing, cell hashing, protocol twins) settle such cases;
 * a covariate computed from the MP's own genes inflates ``kappa_retained`` above 1: the covariate
   carries those genes' sampling noise as a shared factor, which the decoy turns into
-  co-expression. ``contamination_est`` is the share of counts on TME-specific genes, over half of
-  which form the contamination set (19 of 35 on a seed-3 toy cohort); recomputed without those
-  genes it keeps 0.90 instead of 1.25 there. Estimate covariates from genes outside the audited MP
-  where possible.
+  co-expression. ``contamination_est`` is the share of counts on TME-specific genes, about half of
+  which form the contamination set (18 of 36 at seed 0); on a seed-3 toy cohort, before the toy's
+  technical axes were recalibrated (2026-10-17), 19 of 35, and recomputed without those genes it
+  kept 0.90 instead of 1.25. ``pct_ribo`` and ``pct_long`` (shares of counts on ribosomal-protein
+  and on long genes, :func:`mpaudit.data.qc_metrics`) do the same for MPs made of those genes.
+  Estimate covariates from genes outside the audited MP where possible.
 
 Strata leak a little real signal: per-stratum gene means carry the stratum's share of every
 program, so decoy co-expression grows roughly with (number of strata / cells per sample). Depth
@@ -74,6 +89,9 @@ This is an audit of pipelines that do not model nuisance. It carries no FDR clai
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
+
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -82,11 +100,13 @@ from scipy import stats
 from .coexpr import kappa, matched_random_sets
 from .compare import jaccard_matrix
 from .data import Keys, get_counts, malignant_mask, sample_map
-from .gavish import GavishParams, NMFCache, assemble, compute_programs
+from .gavish import DECOY_TAG, GavishParams, NMFCache, assemble, compute_programs
 
 PER_MP_COLUMNS = ["mp", "arm", "n_decoys", "hits", "recruitment", "mean_best_jaccard", "max_best_jaccard",
                   "kappa_retained"]
-PER_DECOY_COLUMNS = ["arm", "decoy", "n_robust", "n_mps"]
+# n_fits: NMF runs behind the decoy cohort's programs (samples x ranks x nrun); n_capped_fits: of which stopped
+# at max_iter; n_failed_fits: of which stopped by the restart limit (see mpaudit.gavish)
+PER_DECOY_COLUMNS = ["arm", "decoy", "n_robust", "n_mps", "n_fits", "n_capped_fits", "n_failed_fits"]
 
 
 def _is_continuous(v: pd.Series) -> bool:
@@ -244,7 +264,13 @@ def make_decoy(
 
     ``strata`` lists obs columns to condition on. With ``method="residual"``, numeric columns with
     more than 10 distinct values enter the mean model as continuous covariates; the others define
-    permutation strata.
+    permutation strata. The choice is made per sample, on the sample's malignant cells. Missing
+    values are not modelled: a continuous column's NaN take the sample's median, a categorical
+    column's NaN form a stratum of their own, and a numeric column left with 10 or fewer distinct
+    values in a sample becomes a set of strata there, where a cell alone in its stratum keeps its
+    real counts (with ``method="permute"``, NaN fall into their own bin).
+    :func:`mpaudit.pipeline.validate_config` therefore refuses decoy arm columns with NaN in
+    malignant cells.
     """
     if method not in ("residual", "permute"):
         raise ValueError("method must be 'residual' or 'permute'")
@@ -385,6 +411,31 @@ def kappa_retained(
 
 # --------------------------------------------------------------------------- recruitment
 
+def decoy_tag(adata, keys: Keys, **make_decoy_kwargs) -> str:
+    """NMF cache tag of the decoy ``make_decoy(adata, keys, **make_decoy_kwargs)``.
+
+    Readable part: :data:`mpaudit.gavish.DECOY_TAG`, the method, the conditioning columns, the depth
+    bins and the seed. Then a hash of every argument of :func:`make_decoy` (its defaults included, so
+    passing another argument, or changing a default, gives another tag), of the sample and malignant
+    keys and of the values of the conditioning columns and the sample column in malignant cells. The
+    cache key adds the decoy counts' fingerprint and the decoy generator's code
+    (:func:`mpaudit.gavish.code_version`); the values matter because with ``method="permute"`` the
+    counts' totals stay the same when only the covariate values change.
+    """
+    bound = inspect.signature(make_decoy).bind(adata, keys, **make_decoy_kwargs)
+    bound.apply_defaults()
+    args = {k: v for k, v in bound.arguments.items() if k not in ("adata", "keys")}
+    mal = malignant_mask(adata, keys)
+    h = hashlib.sha1(repr(sorted((k, repr(v)) for k, v in args.items())).encode())
+    h.update(repr((keys.sample, keys.malignant, keys.malignant_label)).encode())
+    h.update(np.packbits(mal).tobytes())
+    for col in (keys.sample, *args["strata"]):
+        h.update(col.encode())
+        h.update(pd.util.hash_pandas_object(adata.obs[col][mal], index=False).to_numpy().tobytes())
+    return (f"{DECOY_TAG}{args['method']}-{'+'.join(args['strata'])}-d{args['n_depth_bins']}-s{args['seed']}-"
+            f"{h.hexdigest()[:12]}")
+
+
 def decoy_recruitment(
     adata,
     keys: Keys,
@@ -412,8 +463,8 @@ def decoy_recruitment(
     ``arms`` maps an arm name to the obs columns its decoys condition on (e.g. ``{"technical":
     ("doublet_est", "contamination_est"), "dosage": ("clone_est",)}``); ``strata`` alone defines
     one arm named ``"all"``. An arm's columns are used sorted and de-duplicated, and the NMF cache
-    tag of a decoy names them with the method, ``n_depth_bins`` and the seed, so arms with the same
-    columns share fits.
+    tag of a decoy (:func:`decoy_tag`) is built from the arguments of its :func:`make_decoy` call
+    and the columns' values, so arms with the same columns share fits.
 
     Returns ``(per_mp, per_decoy, decoy_mps)``:
 
@@ -421,7 +472,9 @@ def decoy_recruitment(
       at Jaccard >= ``min_jaccard`` to the real MP), ``recruitment`` (``hits / n_decoys``),
       ``mean_best_jaccard``, ``max_best_jaccard`` (best match per decoy, over decoys) and
       ``kappa_retained`` (``min_cells``, ``min_kappa``, ``n_null_floor``: see the module docstring);
-    * ``per_decoy``: ``arm``, ``decoy`` (cache tag), ``n_robust``, ``n_mps``;
+    * ``per_decoy``: ``arm``, ``decoy`` (cache tag), ``n_robust``, ``n_mps``, and the NMF fit
+      diagnostics of the decoy cohort (``n_fits``, ``n_capped_fits`` stopped at ``max_iter``,
+      ``n_failed_fits`` stopped by the restart limit; :class:`mpaudit.gavish.GavishResult`);
     * ``decoy_mps``: cache tag -> the decoy cohort's MPs.
     """
     if arms is None:
@@ -443,9 +496,10 @@ def decoy_recruitment(
         best = {m: [] for m in real_mps}
         retained = {m: [] for m in real_mps}
         for d in range(n_decoys):
-            tag = f"decoy-{method}-{'+'.join(cols)}-d{n_depth_bins}-s{seed + d}"
-            dec = make_decoy(adata, keys, counts_layer=counts_layer, strata=cols, n_depth_bins=n_depth_bins,
-                             method=method, seed=seed + d)
+            kwargs = dict(counts_layer=counts_layer, strata=cols, n_depth_bins=n_depth_bins, method=method,
+                          seed=seed + d)
+            tag = decoy_tag(adata, keys, **kwargs)
+            dec = make_decoy(adata, keys, **kwargs)
             for m, ratios in _retained_ratios(refs, get_counts(dec, counts_layer), min_kappa).items():
                 retained[m].append(float(np.median(ratios)))
             spg = compute_programs(dec, keys, params, counts_layer=counts_layer, cache=cache, data_tag=tag,
@@ -453,11 +507,15 @@ def decoy_recruitment(
             res = assemble(spg, params, unit_of_sample=unit, study_of_sample=study)
             sets = res.mp_sets()
             decoy_mps[tag] = sets
-            per_decoy.append({"arm": arm, "decoy": tag, "n_robust": len(res.robust), "n_mps": len(sets)})
+            per_decoy.append({"arm": arm, "decoy": tag, "n_robust": len(res.robust), "n_mps": len(sets),
+                              "n_fits": res.n_fits, "n_capped_fits": res.n_capped_fits,
+                              "n_failed_fits": res.n_failed_fits})
             J = jaccard_matrix(real_mps, sets) if sets else np.zeros((len(real_mps), 0))
             for i, m in enumerate(real_mps):
                 best[m].append(float(J[i].max()) if J.shape[1] else 0.0)
-            log(f"[decoy] {arm}: {tag}: {len(res.robust)} robust programs, {len(sets)} decoy MPs")
+            log(f"[decoy] {arm}: {tag}: {len(res.robust)} robust programs, {len(sets)} decoy MPs; "
+                f"{res.n_capped_fits}/{res.n_fits} NMF fits stopped at max_iter, {res.n_failed_fits} by the restart "
+                "limit")
         for m in real_mps:
             b = np.array(best[m])
             hits = int((b >= min_jaccard).sum())

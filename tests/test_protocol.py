@@ -1,4 +1,4 @@
-"""Axis A4 (mpaudit.protocol): paired Δlog κ, protocol-specific intensity controls and the two nulls."""
+"""Axis A4 (mpaudit.protocol): paired Δlog κ, protocol-specific intensity controls, the two nulls and the κ gate."""
 from functools import lru_cache
 
 import numpy as np
@@ -8,10 +8,10 @@ import scipy.sparse as sp
 from scipy import stats
 
 from mpaudit.data import Keys, get_counts, log2_cpm10, malignant_mask
-from mpaudit.protocol import (KAPPA_FLOOR, KAPPA_MIN_EFFECT, per_sample_kappa, protocol_shift, protocol_shift_kappa,
-                              replicate_bound, tumour_shifts)
+from mpaudit.protocol import (KAPPA_ACTIVE, KAPPA_FLOOR, KAPPA_MIN_EFFECT, MIN_PAIRS, per_sample_kappa, protocol_shift,
+                              protocol_shift_kappa, replicate_bound, tumour_shifts)
 from mpaudit.scoring import score_gene_sets
-from mpaudit.sim import simulate_cohort
+from mpaudit.sim import FIRST_MAGNITUDES, axis_magnitudes, simulate_cohort
 
 KEYS = Keys(sample="sample", tumour="tumour", protocol="protocol")
 # 4 paired tumours (fresh + fixed) and 3 tumours with two fresh pieces (3 replicate pairs);
@@ -35,6 +35,24 @@ def _cohort():
 def _shift(min_pairs: int):
     adata, sets = _cohort()
     return protocol_shift_kappa(adata, KEYS, sets, "fresh", "fixed", min_pairs=min_pairs, n_null_sets=40)
+
+
+@lru_cache(maxsize=None)
+def _carrier_shift():
+    """The small cohort with EMT and IFN, each planted in some tumours only; and which tumours carry them.
+
+    The toy's technical axes are at their first magnitudes (``mpaudit.sim.FIRST_MAGNITUDES``), where
+    a program absent from a tumour sits at the background of matched random sets. At the recalibrated
+    magnitudes the abundance axis dilutes every gene by one per-cell factor, the planted sets co-vary
+    beyond their matched random sets also where they are absent, and every non-carrier test of this
+    cohort passes the gate (module docstring of :mod:`mpaudit.protocol`).
+    """
+    with axis_magnitudes(*FIRST_MAGNITUDES):
+        adata, truth = simulate_cohort(**SMALL)
+    sets = {k: truth["sets"][k] for k in ("cycle", "hypoxia", "stress", "EMT", "IFN")}
+    per_mp, per_tumour, _ = protocol_shift_kappa(adata, KEYS, sets, "fresh", "fixed", n_null_sets=100)
+    carriers = {"EMT": set(map(str, truth["tumours_emt"])), "IFN": set(map(str, truth["tumours_ifn"]))}
+    return per_mp, per_tumour, carriers
 
 
 def _levels(paired: dict[str, float], replicates: dict[str, float], metric: str = "intensity",
@@ -209,9 +227,10 @@ def test_random_set_kappa_null_moved_to_the_mp_level():
     lv, nl = _kappa_null(rng, 0.012, 0.012, 0.01, 0.60, 0.30)
     res = protocol_shift(lv, "fresh", "fixed", null_levels=nl).iloc[0]
     assert res["n_paired_tumours"] == 4 and res["frac_loss_beyond_null_kappa"] == 1.0
-    # an MP at the floor under the reference cannot lose κ
+    # an MP at the floor under the reference is inactive there: not tested, not a loss
     lv, nl = _kappa_null(rng, 0.012, 0.012, 0.01, 0.005, 0.001)
-    assert protocol_shift(lv, "fresh", "fixed", null_levels=nl).iloc[0]["frac_loss_beyond_null_kappa"] == 0
+    res = protocol_shift(lv, "fresh", "fixed", null_levels=nl).iloc[0]
+    assert res["n_paired_tumours"] == 0 and np.isnan(res["frac_loss_beyond_null_kappa"])
 
 
 def test_null_type_per_statistic_ignores_nan_kappa_pairs():
@@ -271,6 +290,172 @@ def test_kappa_flags_stress_not_cycle_with_replicate_null():
         assert abs(per_mp.loc[mp, "mean_delta_log_kappa"]) < np.log(1.5)
     for mp in ("cycle", "hypoxia"):  # unaffected by protocol: no intensity loss with protocol-specific controls
         assert per_mp.loc[mp, "frac_loss_beyond_null_intensity"] == 0
+
+
+def _active_levels(paired: dict[str, tuple[float, float]], replicates: dict[str, tuple[float, float]]) -> pd.DataFrame:
+    """One MP with κ and intensity: paired tumours at ``(reference, test)`` κ; replicates with two fresh pieces."""
+    rows = []
+    for t, (k_ref, k_test) in paired.items():
+        rows += [{"sample": f"{t}_fresh", "tumour": t, "protocol": "fresh", "mp": "m", "kappa": k_ref,
+                  "intensity": 0.0},
+                 {"sample": f"{t}_fixed", "tumour": t, "protocol": "fixed", "mp": "m", "kappa": k_test,
+                  "intensity": -3.0}]
+    for t, (k1, k2) in replicates.items():
+        rows += [{"sample": f"{t}_R1", "tumour": t, "protocol": "fresh", "mp": "m", "kappa": k1, "intensity": 0.0},
+                 {"sample": f"{t}_R2", "tumour": t, "protocol": "fresh", "mp": "m", "kappa": k2, "intensity": 0.1}]
+    return pd.DataFrame(rows)
+
+
+def _sample_null(lv: pd.DataFrame, kappa_by_sample: dict[str, float], n_sets: int = 40) -> pd.DataFrame:
+    """Random sets in every sample of ``lv``: κ about ``kappa_by_sample`` (default 0.01), 0.001 apart."""
+    rows = []
+    for _, r in lv.iterrows():
+        k = kappa_by_sample.get(r["sample"], 0.01)
+        rows += [{"mp": "m", "tumour": r["tumour"], "sample": r["sample"], "protocol": r["protocol"], "set": j,
+                  "kappa": k + 0.001 * (j - n_sets / 2), "intensity": 0.0} for j in range(n_sets)]
+    return pd.DataFrame(rows)
+
+
+def test_n_paired_tumours_counts_only_tumours_where_the_mp_is_active():
+    lv = _active_levels({"A": (0.5, 0.1), "B": (0.5, 0.1), "C": (0.5, 0.1), "D": (0.03, 0.02), "E": (0.02, 0.3)},
+                        {"F": (0.5, 0.45), "G": (0.5, 0.55), "H": (0.5, 0.5)})
+    sh = tumour_shifts(lv, "fresh", "fixed").set_index("tumour")
+    assert KAPPA_ACTIVE == 0.05 and MIN_PAIRS == 3
+    assert sh["kappa_active_reference"].tolist() == [True, True, True, False, False]
+    assert sh["kappa_active_test"].tolist() == [True, True, True, False, True]
+    assert sh["kappa_active"].tolist() == [True, True, True, False, True]  # D: below 0.05 in both pieces
+    assert sh[["kappa_reference_q95_random", "kappa_test_q95_random"]].isna().all().all()
+    assert (sh[["kappa_active_threshold_reference", "kappa_active_threshold_test"]] == KAPPA_ACTIVE).all().all()
+    assert sh["loss_kappa"].tolist() == [True, True, True, pd.NA, False]
+    assert sh["gain_kappa"].tolist() == [False, False, False, pd.NA, True]  # E: present only under test, a gain
+    assert sh["loss_intensity"].notna().all()  # no activity gate for intensity
+    res = protocol_shift(lv, "fresh", "fixed").iloc[0]
+    assert res["n_paired_tumours"] == 4 and res["frac_loss_beyond_null_kappa"] == 0.75
+    assert res["mean_delta_log_kappa"] == pytest.approx((3 * np.log(0.2) + np.log(15)) / 4)  # D left out
+    # a higher floor: no tumour is active, none is tested
+    high = protocol_shift(lv, "fresh", "fixed", kappa_active=0.6).iloc[0]
+    assert high["n_paired_tumours"] == 0 and np.isnan(high["frac_loss_beyond_null_kappa"])
+    # with random sets each piece's threshold is the larger of the floor and the q95 of the random sets' κ
+    # under its protocol (mean over the tumour's samples): B is below both of its thresholds
+    nl = _sample_null(lv, {"B_fresh": 0.55, "B_fixed": 0.15})
+    sh = tumour_shifts(lv, "fresh", "fixed", null_levels=nl).set_index("tumour")
+    q = 0.001 * (np.quantile(np.arange(40), 0.95) - 20)
+    assert sh.loc["B", "kappa_reference_q95_random"] == pytest.approx(0.55 + q)
+    assert sh.loc["B", "kappa_active_threshold_reference"] == pytest.approx(0.55 + q)
+    assert sh.loc["B", "kappa_test_q95_random"] == pytest.approx(0.15 + q)
+    assert sh.loc["B", "kappa_active_threshold_test"] == pytest.approx(0.15 + q)
+    assert sh.loc["A", "kappa_active_threshold_reference"] == KAPPA_ACTIVE  # random-set q95 0.029 is below the floor
+    assert sh["kappa_active"].tolist() == [True, False, True, False, True]
+    assert protocol_shift(lv, "fresh", "fixed", null_levels=nl).iloc[0]["n_paired_tumours"] == 3
+
+
+def test_replicate_pair_needs_the_mp_active_in_one_piece():
+    lv = _active_levels({"A": (0.5, 0.1), "B": (0.5, 0.1)},
+                        {"E": (0.5, 0.4), "F": (0.5, 0.6), "G": (0.5, 0.02), "H": (0.03, 0.02)})
+    res = protocol_shift(lv, "fresh", "fixed").iloc[0]
+    # G (one piece without the program) stays in the κ null, as a paired tumour whose test piece lacks the
+    # program stays tested; H (both pieces below the floor) leaves it
+    assert res["n_null_pairs"] == 3 and res["n_null_tumours"] == 3 and res["null_type"] == "replicates"
+    sh = tumour_shifts(lv, "fresh", "fixed")
+    d = np.log([0.4 / 0.5, 0.6 / 0.5, 0.02 / 0.5])
+    assert sh["null_hi_kappa"].to_numpy() == pytest.approx(stats.t.ppf(0.95, 3) * np.sqrt(np.mean(d**2)))
+    assert sh["null_hi_intensity"].to_numpy() == pytest.approx(stats.t.ppf(0.95, 4) * 0.1)  # intensity keeps H
+    # per piece, the threshold is the larger of the floor and that sample's random-set q95: F leaves the κ
+    # null when both of its pieces are below theirs, not when one is
+    both = _sample_null(lv, {"F_R1": 0.65, "F_R2": 0.65})
+    res = protocol_shift(lv, "fresh", "fixed", null_levels=both, min_pairs=1).iloc[0]
+    assert res["n_null_pairs"] == 2 and res["n_null_tumours"] == 2  # E and G
+    one = _sample_null(lv, {"F_R2": 0.65})
+    assert protocol_shift(lv, "fresh", "fixed", null_levels=one, min_pairs=1).iloc[0]["n_null_pairs"] == 3
+    # without a sample column the pieces cannot be matched to their random sets: floor only
+    res = protocol_shift(lv.drop(columns="sample"), "fresh", "fixed", null_levels=both, min_pairs=1).iloc[0]
+    assert res["n_null_pairs"] == 3
+
+
+def test_activity_gate_keeps_kappa_calls_calibrated():
+    """No protocol effect and every piece's κ drawn alike near the activity floor: about 5% of the
+    tested tumours are losses and 5% gains.
+
+    The gate selects paired tumours and replicate pairs on the same condition (the MP active in at
+    least one of the two pieces), so their changes stay exchangeable. Testing a paired tumour only
+    where its reference piece is active, while a replicate pair needed both pieces active, gave about
+    15% losses here: tumours that pass on a noisy reference κ tend to drop, and a test piece below the
+    floor has no counterpart in a null that excludes such pieces.
+    """
+    rng = np.random.default_rng(3)
+    n_mp, n_paired, n_rep = 1500, 4, 6
+    n_t = n_paired + n_rep
+    k = np.exp(rng.normal(np.log(0.06), 0.35, size=(n_mp, n_t, 2)))
+    tumours = [f"P{i}" for i in range(n_paired)] + [f"R{i}" for i in range(n_rep)]
+    protocol = np.array([[("fresh", "fixed") if t.startswith("P") else ("fresh", "fresh") for t in tumours]])
+    lv = pd.DataFrame({"mp": np.repeat([f"m{i}" for i in range(n_mp)], 2 * n_t),
+                       "tumour": np.tile(np.repeat(tumours, 2), n_mp),
+                       "protocol": np.broadcast_to(protocol, (n_mp, n_t, 2)).ravel(),
+                       "sample": np.tile([f"{t}_{j}" for t in tumours for j in (1, 2)], n_mp),
+                       "kappa": k.ravel()})
+    sh = tumour_shifts(lv, "fresh", "fixed")
+    tested = sh["loss_kappa"].notna()
+    assert 0.85 < tested.mean() < 0.97  # tumours with both pieces below 0.05 are not tested
+    loss, gain = sh.loc[tested, "loss_kappa"].astype(bool).mean(), sh.loc[tested, "gain_kappa"].astype(bool).mean()
+    assert 0.035 < loss < 0.065 and 0.035 < gain < 0.065
+
+
+def test_a_patchy_program_widens_the_replicate_null_instead_of_counting():
+    """No protocol effect; the program is absent from some pieces (regional patchiness): from one piece of
+    replicate tumour R2 and from the test pieces of paired tumours P3 and P4. R2's pair stays in the κ
+    null, as P3 and P4 stay tested, so their drops are within the null."""
+    lv = _active_levels({"P1": (0.50, 0.47), "P2": (0.48, 0.52), "P3": (0.50, 0.03), "P4": (0.52, 0.03)},
+                        {"R1": (0.50, 0.45), "R2": (0.50, 0.03), "R3": (0.47, 0.52), "R4": (0.50, 0.55)})
+    res = protocol_shift(lv, "fresh", "fixed").iloc[0]
+    assert res["null_type"] == "replicates" and res["n_null_pairs"] == 4 and res["n_paired_tumours"] == 4
+    assert res["frac_loss_beyond_null_kappa"] == 0
+
+
+def test_kappa_not_tested_in_tumours_without_the_program():
+    """EMT and IFN are planted in some tumours; elsewhere their κ is background and is not tested.
+
+    Without the activity gate, T01 (which carries neither) had an EMT κ loss (0.11 -> -0.01,
+    Δlog κ -2.4 after flooring) and an IFN gain (0.06 -> 0.15), and the replicate pieces of
+    non-carrier tumours entered the replicate null.
+    """
+    per_mp, pt, carriers = _carrier_shift()
+    per_mp = per_mp.set_index("mp")
+    for mp in ("EMT", "IFN"):
+        t = pt[pt["mp"] == mp].set_index("tumour")
+        carrier = t.index.isin(sorted(carriers[mp]))
+        assert carrier.any() and (~carrier).any() and not carrier[0]  # T01 carries neither
+        assert t.loc[~carrier, "loss_kappa"].isna().all() and t.loc[~carrier, "gain_kappa"].isna().all()
+        assert not t.loc[~carrier, "kappa_active"].any()  # below both thresholds
+        assert t.loc[carrier, "kappa_active"].all() and t.loc[carrier, "loss_kappa"].notna().all()
+        assert not t.loc[carrier, "loss_kappa"].any()  # EMT is more prevalent under fixed; IFN is unaffected
+        assert per_mp.loc[mp, "n_paired_tumours"] == carrier.sum()
+        for side in ("reference", "test"):
+            threshold = np.fmax(KAPPA_ACTIVE, t[f"kappa_{side}_q95_random"].to_numpy())
+            assert t[f"kappa_active_threshold_{side}"].to_numpy() == pytest.approx(threshold)
+        active = ((t["kappa_reference"] > t["kappa_active_threshold_reference"])
+                  | (t["kappa_test"] > t["kappa_active_threshold_test"]))
+        assert t["kappa_active"].astype(bool).tolist() == active.tolist()
+        assert (t.loc[~carrier, "kappa_reference"] > KAPPA_ACTIVE).any()  # the floor alone would test them
+    assert pt.set_index(["mp", "tumour"]).loc[("EMT", "T01"), "delta_log_kappa"] < -2
+    # replicate tumours: T07 lacks EMT and both its pieces are below their thresholds, so EMT's κ null has 2 < 3
+    # tumours and falls back to random sets; T05 lacks IFN, but one of its pieces passes, so its pair stays
+    assert per_mp.loc["EMT", "n_null_tumours"] == 2 and per_mp.loc["EMT", "null_type"] == "random_sets"
+    assert per_mp.loc["IFN", "n_null_tumours"] == 3 and per_mp.loc["IFN", "null_type"] == "replicates"
+    # programs active everywhere are unaffected; stress still loses κ in every paired tumour
+    for mp in ("cycle", "hypoxia", "stress"):
+        assert per_mp.loc[mp, "n_paired_tumours"] == 4 and per_mp.loc[mp, "n_null_tumours"] == 3
+    assert per_mp.loc["stress", "frac_loss_beyond_null_kappa"] == 1.0
+    assert (per_mp.loc[["cycle", "hypoxia"], "frac_loss_beyond_null_kappa"] == 0).all()
+
+
+def test_no_random_sets_when_no_mp_passes_the_panel():
+    """An MP whose genes are mostly missing (ι < 0.5 in every tumour) gets no random sets; nothing is tested."""
+    adata, sets = _cohort()
+    absent = {"mostly_absent": sets["cycle"][:10] + [f"NOT_A_GENE{i}" for i in range(30)]}
+    per_mp, per_tumour, levels = protocol_shift_kappa(adata, KEYS, absent, "fresh", "fixed", n_null_sets=40)
+    assert levels["kappa"].isna().all()
+    assert per_mp.iloc[0]["n_paired_tumours"] == 0 and per_tumour["loss_kappa"].isna().all()
+    assert per_tumour["kappa_reference_q95_random"].isna().all()
 
 
 def test_random_set_null_used_below_min_pairs():

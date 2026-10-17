@@ -1,16 +1,22 @@
+import hashlib
 import json
+import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from mpaudit import Keys, pipeline
+from mpaudit import Keys, cli, pipeline
 from mpaudit.coexpr import kappa
 from mpaudit.compare import jaccard_matrix
 from mpaudit.data import get_counts, malignant_mask, write_gmt
-from mpaudit.decoy import make_decoy
-from mpaudit.pipeline import check_names, curated_labels, merge_config, run_p1, validate_config
+from mpaudit.decoy import PER_DECOY_COLUMNS, make_decoy
+from mpaudit.pipeline import (check_arm_values, check_names, config_deviations, curated_labels, merge_config, run_p1,
+                              validate_config)
 from mpaudit.sim import simulate_cohort
+
+EXAMPLE_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "p1_3ca_example.yaml"
 
 KEYS = dict(sample="sample", malignant="malignant", tumour="tumour", study="study", cancer_type="cancer_type",
             cell_type="cell_type", protocol="protocol", clone="clone", doublet="doublet_score")
@@ -83,12 +89,19 @@ def test_run_p1_end_to_end(small, tmp_path):
         "typer": {"labels": str(tmp_path / "labels.csv"), "labelled_gmt": str(tmp_path / "labelled.gmt")},
         "protocol": {"reference": "fresh", "test": "fixed", "n_null_sets": 20},
         "decision": {"expected_tme_shared_sets": {"IFN": truth["sets"]["IFN"]}},
+        "unregistered_variant": True,  # few decoys and null sets, for speed
     }
     out_dir = tmp_path / "out"
-    with pytest.warns(UserWarning, match="gave no gene positions; falling back to adata.var"):
+    with pytest.warns(UserWarning) as rec:
         out = run_p1(adata, cfg, out_dir, log=lambda *a: None)
+    messages = [str(w.message) for w in rec]
+    assert any("gave no gene positions; falling back to adata.var" in m for m in messages)
+    assert any(m.startswith("unregistered variant: the verdict will be labelled") for m in messages)
+    assert not any("expected-TME-shared" in m or "no typer.labels" in m for m in messages)
     d = out["decision"]
-    assert d["rule_version"] == "P1-GO v1.1"
+    variant = "P1-GO v1.2 (unregistered variant: decoy.n=1, tme.n_null=40, protocol.n_null_sets=20)"
+    assert d["rule_version"] == variant and not d["registered_rule"] and d["curated_labels_given"]
+    assert [x["setting"] for x in d["deviations"]] == ["decoy.n", "tme.n_null", "protocol.n_null_sets"]
     # 1 decoy per arm (< 5), 9 samples with TME cells (< 10), 2 paired tumours (< 4): nothing is powered
     assert d["verdict"] == "INCOMPLETE" and not any(d["powered"].values())
     for f in ["summary.md", "mp_flags.csv", "run_config.json", "typer_features.csv", "decoy_recruitment.csv",
@@ -110,7 +123,36 @@ def test_run_p1_end_to_end(small, tmp_path):
     assert (mapping["source"] == "gene overlap").any() and not (mapping["source"] == "name").any()
     run_cfg = json.loads((out_dir / "run_config.json").read_text())
     assert "multiplied by 1.5" in run_cfg["rule"] and "a 1.5-fold loss" in run_cfg["rule"]
-    assert "INCOMPLETE" in (out_dir / "summary.md").read_text()
+    assert run_cfg["rule"].startswith(f"Rule {variant}:")
+    assert "replicate pairs of >= 3 distinct tumours" in run_cfg["rule"]
+    assert run_cfg["rule_version"] == variant and run_cfg["registered_rule"] is False
+    assert run_cfg["deviations"] == [{"setting": "decoy.n", "value": 1, "registered": "5"},
+                                     {"setting": "tme.n_null", "value": 40, "registered": "500"},
+                                     {"setting": "protocol.n_null_sets", "value": 20, "registered": "100"}]
+    assert run_cfg["config"]["protocol"]["kappa_active"] == 0.05 and run_cfg["config"]["unregistered_variant"] is True
+    assert {"kappa_active", "kappa_active_reference", "kappa_active_test", "kappa_active_threshold_reference",
+            "kappa_active_threshold_test"} <= set(out["tables"]["protocol_tumours"])
+    # NMF fit diagnostics: per decoy run, per perturbation, and totals in run_config.json and summary.md
+    runs = out["tables"]["decoy_runs"]
+    assert list(runs.columns) == PER_DECOY_COLUMNS and len(runs) == 2
+    n_samples = len(out["reference"].top) // sum(cfg["gavish"]["ranks"])  # programs per sample: 3 + 4
+    assert (runs["n_fits"] == n_samples * 2).all() and runs["n_capped_fits"].between(0, runs["n_fits"]).all()
+    inst = out["tables"]["instability_runs"]
+    assert {"n_fits", "n_capped_fits", "n_failed_fits"} <= set(inst.columns) and (inst["n_fits"] > 0).all()
+    fits = run_cfg["nmf_fits"]
+    assert fits["reference"]["n_fits"] == out["reference"].n_fits == n_samples * 2
+    assert fits["decoys"] == {"n_runs": 2, **{c: int(runs[c].sum()) for c in ("n_fits", "n_capped_fits",
+                                                                               "n_failed_fits")}}
+    assert fits["instability"]["n_runs"] == len(inst) and fits["instability"]["n_fits"] == int(inst["n_fits"].sum())
+    summary = (out_dir / "summary.md").read_text()
+    assert "INCOMPLETE" in summary and summary.startswith("# P1 audit summary\n\n**This verdict is NOT the registered")
+    assert f"decoy runs (2) {fits['decoys']['n_capped_fits']}/{fits['decoys']['n_fits']}, " in summary
+    assert "pct_long" in adata.obs  # adata.var has gene_length (the GTF placed no gene)
+    # the input files behind the verdict, for a check against the registered ones
+    assert set(run_cfg["input_files"]) == {"typer.labels", "typer.labelled_gmt", "positional.gtf"}
+    digest = hashlib.sha256((tmp_path / "labels.csv").read_bytes()).hexdigest()
+    assert run_cfg["input_files"]["typer.labels"] == {"path": str(tmp_path / "labels.csv"), "sha256": digest}
+    assert f"typer.labels labels.csv {digest[:16]}" in summary
 
 
 def _no_nmf(*args, **kwargs):
@@ -121,11 +163,22 @@ BASE = {"keys": KEYS, "counts_layer": "counts", "recurrence_key": "tumour",
         "decoy": {"arms": {"technical": ["doublet_est"], "dosage": ["clone_est"]}}}
 
 
+@pytest.fixture(scope="module")
+def registered(small, tmp_path_factory):
+    """BASE plus what the registered rule needs with mps: rederive and positional on: curated labels with the
+    gene sets of the labelled MPs, and a cytoband (the cohort's adata.var has gene positions)."""
+    _, truth = small
+    d = tmp_path_factory.mktemp("registered")
+    _labels(d, truth)
+    return {**BASE, "typer": {"labels": str(d / "labels.csv"), "labelled_gmt": str(d / "labelled.gmt")},
+            "positional": {"cytoband": truth["cytoband"]}}
+
+
 @pytest.mark.parametrize("change, message", [
     ({"decoy": {"strata": ["clone", "doublet_score"], "arms": {}}}, "decoy.strata is no longer accepted"),
     ({"decoy": {"arms": {"tech": ["doublet_est"], "cna": ["clone_est"]}}}, r"\['cna', 'tech'\] are in neither"),
     ({"decoy": {"arms": {"technical": ["doublet_est", "no_such_column"]}}}, "not columns of adata.obs"),
-    ({"decision": {"recruitment": 0.3, "partial_r2": 0.3}}, "before P1-GO v1.0; P1-GO v1.1 replaces"),
+    ({"decision": {"recruitment": 0.3, "partial_r2": 0.3}}, "before P1-GO v1.0; P1-GO v1.2 replaces"),
     ({"decision": {"technical_arms": ["technical"], "dosage_arms": ["technical"]}}, "both technical_arms"),
     ({"decision": {"expected_tme_shared": ["MP17"]}}, "cannot be pre-declared with mps: rederive"),
     ({"decision": {"expected_tme_shared_gmt": "missing.gmt"}}, "is not a file"),
@@ -133,8 +186,40 @@ BASE = {"keys": KEYS, "counts_layer": "counts", "recurrence_key": "tumour",
     ({"typer": {"labelled_gmt": "LABELLED"}}, "needs typer.labels"),
     ({"tme": {"rho_sensitivity": 0}}, "rho_sensitivity must be > 0"),
     ({"protocol": {"kappa_min_effect": "large"}}, "kappa_min_effect must be a number"),
+    ({"protocol": {"kappa_active": "high"}}, "kappa_active must be a number"),
+    ({"protocol": {"kappa_active": True}}, "kappa_active must be a number"),
+    ({"protocol": {"kappa_active": -0.1}}, "kappa_active must be >= 0"),
+    ({"protocol": {"kappa_active": float("inf")}}, "kappa_active must be >= 0"),
+    ({"protocol": {"min_pairs": 0}}, "min_pairs must be >= 1"),
+    ({"protocol": {"min_pairs": 3.0}}, "min_pairs must be a whole number"),
+    ({"protocol": {"min_pairs": True}}, "min_pairs must be a whole number"),
+    ({"protocol": {"min_pairs": "3"}}, "min_pairs must be a whole number"),
+    ({"tme": {"spillover_adjust": "false"}}, "tme.spillover_adjust must be true or false"),
+    ({"tme": {"null_match": "genes"}}, "tme.null_match must be one of"),
+    ({"tme": {"n_null": 500.0}}, "tme.n_null must be a whole number"),
+    ({"decoy": {"method": "shuffle"}}, "decoy.method must be one of"),
+    ({"decoy": {"enabled": "no"}}, "decoy.enabled must be true or false"),
+    ({"positional": {"enabled": 0}}, "positional.enabled must be true or false"),
+    ({"min_jaccard": 1.5}, "min_jaccard must be <= 1"),
+    ({"unregistered_variant": "yes"}, "unregistered_variant must be true or false"),
+    ({"decoy": {"arms": {"technical": ["doublet_est", "pct_long"]}}, "TINY_VAR": True},
+     r"pct_long needs gene lengths: positional.gtf or adata.var\['gene_length'\]"),
+    # deviations from the registered rule, refused without unregistered_variant: true
+    ({"tme": {"rho_sensitivity": None}}, r"tme.rho_sensitivity = None \(registered: 1.5\)"),
+    ({"tme": {"rho_sensitivity": 0.5}}, r"tme.rho_sensitivity = 0.5 \(registered: 1.5\)"),
+    ({"protocol": {"kappa_min_effect": 0.0}}, r"protocol.kappa_min_effect = 0.0 \(registered: 0.405465 \(log 1.5\)\)"),
+    ({"protocol": {"min_pairs": 2}}, r"protocol.min_pairs = 2 \(registered: 3\)"),
+    ({"protocol": {"min_pairs": 4}}, r"protocol.min_pairs = 4 \(registered: 3\)"),
+    ({"seed": 7}, r"seed = 7 \(registered: 0\)"),
+    ({"seed": 1.5}, "seed must be a whole number"),
+    # BASE re-derives MPs without curated labels and has no cytoband: two more deviations, listed after the rule's
+    ({"decision": {"min_mps": 2}}, r"deviates from the registered rule P1-GO v1.2 in 3 setting\(s\): decision.min_mps "
+                                   r"= 2 \(registered: 3\); typer.labels = None \(registered: curated labels with "
+                                   r"typer.labelled_gmt \(needed with mps: rederive\)\); positional.cytoband = None"),
+    ({"typer": {"labels": "RLABELS"}}, r"typer.labelled_gmt = None \(registered: a GMT of the labelled MPs"),
     ({"mps": "missing.gmt"}, "mps must be 'rederive' or a GMT file"),
-    ({"mps": "PUBLISHED", "typer": {"labels": "LABELS"}}, "typer.labels names match none of the 1 audited MPs"),
+    ({"mps": "PUBLISHED", "typer": {"labels": "LABELS"}, "unregistered_variant": True},  # BASE has no cytoband
+     "typer.labels names match none of the 1 audited MPs"),
 ])
 def test_bad_config_fails_before_any_nmf(small, tmp_path, monkeypatch, change, message):
     adata, truth = small
@@ -142,12 +227,18 @@ def test_bad_config_fails_before_any_nmf(small, tmp_path, monkeypatch, change, m
                                                                                          index=False)
     write_gmt({"MP5 Stress": truth["sets"]["stress"]}, tmp_path / "l.gmt")
     write_gmt({"Stress": truth["sets"]["stress"]}, tmp_path / "published.gmt")
+    pd.DataFrame({"mp": ["MP1", "MP2"], "label": [0, 1]}).to_csv(tmp_path / "rl.csv", index=False)
     files = {"LABELS": str(tmp_path / "l.csv"), "LABELLED": str(tmp_path / "l.gmt"),
-             "PUBLISHED": str(tmp_path / "published.gmt")}
+             "PUBLISHED": str(tmp_path / "published.gmt"), "RLABELS": str(tmp_path / "rl.csv")}
 
     def sub(x):
         return {k: sub(v) for k, v in x.items()} if isinstance(x, dict) else files.get(x, x) if isinstance(x, str) else x
 
+    change = dict(change)
+    if change.pop("TINY_VAR", False):  # a cohort without gene lengths in var (and no pct_long from an earlier run)
+        adata = adata.copy()
+        adata.var = adata.var.drop(columns="gene_length")
+        adata.obs = adata.obs.drop(columns="pct_long", errors="ignore")
     cfg = {k: dict(v) if isinstance(v, dict) else v for k, v in BASE.items()}
     for k, v in sub(change).items():
         cfg[k] = {**cfg[k], **v} if isinstance(cfg.get(k), dict) else v
@@ -157,17 +248,192 @@ def test_bad_config_fails_before_any_nmf(small, tmp_path, monkeypatch, change, m
     assert not (tmp_path / "out").exists()
 
 
-def test_decoy_arm_checks(small):
+def test_decoy_arm_checks(small, registered):
     adata, _ = small
-    cfg = merge_config({**BASE, "decoy": {"arms": {"technical": "doublet_est"}}})
-    with pytest.warns(UserWarning, match="no decoy arm is a dosage arm"):
-        cfg = validate_config(cfg, adata, log=lambda *a: None)
+    cfg = merge_config({**registered, "decoy": {"arms": {"technical": "doublet_est"}}})
+    # no dosage arm: the dosage-arm exclusion cannot run, a deviation from the registered rule
+    with pytest.raises(ValueError, match=r"decoy.arms = \['technical'\] \(registered: an arm named in "
+                                         r"decision.dosage_arms"):
+        _quiet(validate_config, cfg, adata, log=lambda *a: None)
+    cfg = _quiet(validate_config, merge_config({**cfg, "unregistered_variant": True}), adata, log=lambda *a: None)
     assert cfg["decoy"]["arms"] == {"technical": ["doublet_est"]}  # a scalar column becomes a list
-    cfg = merge_config({**BASE, "decoy": {"arms": {"technical": ["pct_ribo"], "cna": ["clone_est"]}},
+    cfg = merge_config({**registered, "decoy": {"arms": {"technical": ["pct_ribo"], "cna": ["clone_est"]}},
                         "decision": {"dosage_arms": ["cna"]}})
-    validate_config(cfg, adata, log=lambda *a: None)  # renamed arm listed in the rule; QC columns come later
-    cfg = merge_config({**BASE, "decoy": {"enabled": False, "arms": {"tech": ["doublet_est"]}}})
-    validate_config(cfg, adata, log=lambda *a: None)  # decoys off: arm names are not used
+    _quiet(validate_config, cfg, adata, log=lambda *a: None)  # renamed arm listed in the rule; QC columns come later
+    off = {**registered, "decoy": {"enabled": False, "arms": {"tech": ["doublet_est"]}}}
+    with pytest.raises(ValueError, match="decoy.enabled = False"):  # decoys off drop the dosage-arm exclusion
+        _quiet(validate_config, merge_config(off), adata, log=lambda *a: None)
+    cfg = _quiet(validate_config, merge_config({**off, "unregistered_variant": True}), adata, log=lambda *a: None)
+    assert [d[0] for d in config_deviations(cfg)] == ["decoy.enabled"]  # arm names unused, not a second deviation
+
+
+def test_protocol_settings_are_normalised(small, registered):
+    adata, _ = small
+    cfg = _quiet(validate_config, merge_config(registered), adata, log=lambda *a: None)
+    assert cfg["protocol"]["kappa_active"] == 0.05 and cfg["protocol"]["min_pairs"] == 3 and cfg["seed"] == 0
+    cfg = _quiet(validate_config, merge_config({**registered, "protocol": {"kappa_active": "0.05",
+                                                                            "min_pairs": np.int64(3)}}),
+                 adata, log=lambda *a: None)
+    assert type(cfg["protocol"]["kappa_active"]) is float and type(cfg["protocol"]["min_pairs"]) is int
+    assert config_deviations(cfg) == []
+
+
+def _quiet(fn, *args, **kwargs):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return fn(*args, **kwargs)
+
+
+def test_registered_defaults_and_the_example_config_pass(small, registered):
+    adata, _ = small
+    cfg = _quiet(validate_config, merge_config(registered), adata, log=lambda *a: None)
+    assert config_deviations(cfg) == [] and cfg["unregistered_variant"] is False
+    yaml = pytest.importorskip("yaml")
+    example = yaml.safe_load(EXAMPLE_CONFIG.read_text())
+    assert example["unregistered_variant"] is False and example["min_jaccard"] == 0.3 and example["seed"] == 0
+    # as shipped, the curated labels are still to be filled in, which mps: rederive needs
+    with pytest.raises(ValueError, match=r"in 1 setting\(s\): typer.labels = None"):
+        _quiet(validate_config, merge_config(example), log=lambda *a: None)  # no cohort: obs not read
+    example["typer"] = {**example["typer"], **registered["typer"]}
+    cfg = _quiet(validate_config, merge_config(example), log=lambda *a: None)
+    assert config_deviations(cfg) == []
+
+
+@pytest.mark.parametrize("change", [
+    {"tme": {"rho_sensitivity": None}}, {"tme": {"rho_sensitivity": 1.0}}, {"tme": {"spillover_adjust": False}},
+    {"tme": {"null_match": "expression"}}, {"tme": {"n_null": 100}}, {"tme": {"n_null": 1000}},
+    {"protocol": {"kappa_min_effect": 0.2}}, {"protocol": {"kappa_active": 0.0}}, {"protocol": {"min_pairs": 1}},
+    {"protocol": {"min_pairs": 4}}, {"protocol": {"n_null_sets": 20}}, {"protocol": {"n_null_sets": 200}},
+    {"min_jaccard": 0.2}, {"seed": 3}, {"decoy": {"n": 3}}, {"positional": {"enabled": False}},
+    {"decision": {"min_hits": 1}}, {"decision": {"a1_null": "null_q95"}},
+    # inputs without which an exclusion does not run although its axis is on
+    {"typer": {"labels": None, "labelled_gmt": None}}, {"decoy": {"arms": {"technical": ["doublet_est"]}}},
+    {"decision": {"dosage_arms": []}}, {"positional": {"cytoband": None}}])
+def test_each_deviation_is_refused_by_default_and_labelled_when_allowed(small, registered, change):
+    adata, _ = small
+    cfg = {**registered, **{k: {**registered.get(k, {}), **v} if isinstance(v, dict) else v
+                            for k, v in change.items()}}
+    if change == {"decision": {"dosage_arms": []}}:  # the arm 'dosage' is then named nowhere: rename it technical
+        cfg["decoy"] = {"arms": {"technical": ["doublet_est", "clone_est"]}}
+    (section, value), = change.items()
+    setting = f"{section}.{next(iter(value))}" if isinstance(value, dict) else section
+    setting = {"decision.dosage_arms": "decoy.arms"}.get(setting, setting)
+    with pytest.raises(ValueError, match=rf"registered rule P1-GO v1.2 in 1 setting\(s\): {setting} = "):
+        _quiet(validate_config, merge_config(cfg), adata, log=lambda *a: None)
+    log = []
+    with pytest.warns(UserWarning, match=rf"labelled 'P1-GO v1.2 \(unregistered variant: {setting}="):
+        cfg = validate_config(merge_config({**cfg, "unregistered_variant": True}), adata, log=log.append)
+    assert [d[0] for d in config_deviations(cfg)] == [setting]
+
+
+def test_failed_fits_are_warned_about():
+    log = []
+    with pytest.warns(UserWarning, match="decoy runs: 2 of 600 NMF fits were stopped by the restart limit"):
+        pipeline._warn_failed_fits("decoy runs", {"n_runs": 10, "n_fits": 600, "n_capped_fits": 9,
+                                                  "n_failed_fits": 2}, log.append)
+    assert log and log[0].startswith("[p1] warning: decoy runs: 2 of 600")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        pipeline._warn_failed_fits("decoy runs", {"n_fits": 600, "n_failed_fits": 0}, log.append)
+        pipeline._warn_failed_fits("instability runs", None, log.append)
+    runs = pd.DataFrame({"n_fits": [10, 20], "n_capped_fits": [1, 0], "n_failed_fits": [0, 3]})
+    assert pipeline._fit_totals(runs) == {"n_runs": 2, "n_fits": 30, "n_capped_fits": 1, "n_failed_fits": 3}
+    assert pipeline._fit_totals(None) is None and pipeline._fit_totals(pd.DataFrame({"x": [1]})) is None
+
+
+def test_cli_refuses_a_deviation_before_reading_the_cohort(tmp_path, capsys):
+    missing = str(tmp_path / "no_such_cohort.h5ad")
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps({**BASE, "tme": {"rho_sensitivity": None}}))
+    with pytest.raises(SystemExit):
+        cli.main(["p1", missing, "--config", str(path), "--out", str(tmp_path / "out")])
+    err = capsys.readouterr().err
+    assert "tme.rho_sensitivity = None (registered: 1.5)" in err and "unregistered_variant: true" in err
+    # allowed as a variant, the check passes and the run stops only at the missing cohort file
+    path.write_text(json.dumps({**BASE, "tme": {"rho_sensitivity": None}, "unregistered_variant": True}))
+    with pytest.raises((FileNotFoundError, OSError)):
+        cli.main(["p1", missing, "--config", str(path), "--out", str(tmp_path / "out")])
+
+
+def test_tme_and_label_warnings(small, registered, tmp_path):
+    adata, truth = small
+    with pytest.warns(UserWarning) as rec:
+        validate_config(merge_config(registered), adata, log=lambda *a: None)
+    assert [str(w.message).split(" (")[0] for w in rec] == ["no expected-TME-shared MPs are pre-declared"]
+    # pre-declared gene sets silence it
+    declared = {**registered, "decision": {"expected_tme_shared_sets": {"IFN": truth["sets"]["IFN"]}}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        validate_config(merge_config(declared), adata, log=lambda *a: None)
+    # MPs from a GMT without labels: a warning (the published 3CA v2 list already leaves the curated artefacts out);
+    # re-derived MPs without labels: a deviation (test_each_deviation_is_refused_by_default_and_labelled_when_allowed)
+    write_gmt(truth["sets"], tmp_path / "published.gmt")
+    gmt = {**declared, "mps": str(tmp_path / "published.gmt"), "typer": {"labels": None, "labelled_gmt": None}}
+    with pytest.warns(UserWarning, match="fine only if the mps GMT already leaves them out"):
+        validate_config(merge_config(gmt), adata, log=lambda *a: None)
+    no_cells = {**registered, "keys": {k: v for k, v in KEYS.items() if k != "cell_type"}}
+    with warnings.catch_warnings():  # without cell types the TME axis cannot run: no TME warning
+        warnings.simplefilter("error")
+        validate_config(merge_config(no_cells), adata, log=lambda *a: None)
+
+
+def test_exclusions_that_cannot_run_are_deviations(small, registered, tmp_path, monkeypatch):
+    """Positional on without gene positions: refused (before any NMF) or labelled, like positional.enabled false."""
+    adata, _ = small
+    bare = adata.copy()
+    bare.var = bare.var.drop(columns=["chromosome", "start"])
+    with pytest.raises(ValueError, match=r"positional.gtf = None \(registered: gene positions"):
+        _quiet(validate_config, merge_config(registered), bare, log=lambda *a: None)
+    # a GTF that places no var_name is found when it is read, still before any NMF and before the output directory
+    no_names = tmp_path / "no_names.gtf"
+    no_names.write_text('chr1\tsrc\tgene\t11\t500\t.\t+\t.\tgene_id "ENSG1";\n')
+    cfg = {**registered, "positional": {**registered["positional"], "gtf": str(no_names)}}
+    monkeypatch.setattr(pipeline, "run_gavish", _no_nmf)
+    with pytest.raises(ValueError, match=r"no gene positions for the positional axis: positional.gtf = "):
+        _quiet(run_p1, bare, cfg, tmp_path / "out", log=lambda *a: None)
+    assert not (tmp_path / "out").exists()
+    cfg = {**cfg, "unregistered_variant": True}
+    with pytest.raises(AssertionError, match="NMF ran"), pytest.warns(UserWarning) as rec:
+        run_p1(bare, cfg, tmp_path / "out", log=lambda *a: None)
+    assert any("unregistered variant: the verdict will be labelled 'P1-GO v1.2 (unregistered variant: "
+               "positional.gtf=" in str(w.message) for w in rec)
+
+
+def test_decoy_arm_columns_with_nan_are_refused(small):
+    adata, _ = small
+    adata = adata.copy()
+    keys = Keys(**KEYS)
+    mal = malignant_mask(adata, keys)
+    samples = adata.obs["sample"].astype(str)
+    first = samples[mal].iloc[0]
+    frac = adata.obs["doublet_est"].to_numpy(dtype=float).copy()
+    frac[mal & (samples == first).to_numpy()] = np.nan   # e.g. intronic_fraction missing for one study
+    adata.obs["intronic_fraction"] = frac
+    cfg = merge_config({**BASE, "decoy": {"arms": {"technical": ["intronic_fraction"], "dosage": ["clone_est"]}}})
+    with pytest.raises(ValueError, match=rf"intronic_fraction \({int((mal & (samples == first)).sum())} of "
+                                         rf"{int(mal.sum())} malignant cells, in 1 sample\(s\): {first}\)"):
+        _quiet(validate_config, cfg, adata, log=lambda *a: None)
+    # a constant for every cell of the sample without the measurement is accepted (it conditions nothing there)
+    frac[mal & (samples == first).to_numpy()] = 0.0
+    adata.obs["intronic_fraction"] = frac
+    check_arm_values(adata, keys, {"technical": ["intronic_fraction"]})
+    # NaN outside malignant cells (e.g. clone calls only for malignant cells) and in a categorical column
+    clone = adata.obs["clone_est"].astype(object).where(mal, None)
+    adata.obs["clone_est"] = clone
+    check_arm_values(adata, keys, {"dosage": ["clone_est"]})
+    clone[np.flatnonzero(mal)[:3]] = None
+    adata.obs["clone_est"] = clone
+    with pytest.raises(ValueError, match=r"clone_est \(3 of .* explicit label \(e.g. 'unassigned'\)"):
+        check_arm_values(adata, keys, {"dosage": ["clone_est"]})
+    # text placeholders of a missing value, e.g. after astype(str) or a CSV round trip
+    for placeholder in ("nan", " NaN ", "None", ""):
+        text = adata.obs["doublet_est"].astype(str).where(mal, "x")
+        text.iloc[np.flatnonzero(mal)[:2]] = placeholder
+        adata.obs["clone_text"] = text
+        with pytest.raises(ValueError, match=r"text placeholder .*: clone_text \(2 of "):
+            check_arm_values(adata, keys, {"dosage": ["clone_text"]})
+    adata.obs["clone_text"] = adata.obs["doublet_est"].astype(str)
+    check_arm_values(adata, keys, {"dosage": ["clone_text"]})
 
 
 def test_label_and_name_checks_against_audited_mps(tmp_path):

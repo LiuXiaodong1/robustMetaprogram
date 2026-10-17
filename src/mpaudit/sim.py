@@ -32,11 +32,14 @@ Technical effects:
   express a lineage gene set (``truth["malignant_markers"]``: 10x in malignant, 0.1x in TME cells;
   the analogue of epithelial markers in carcinoma), from which the malignant soup is estimable.
 * ``technical_axes`` (all cells): an abundance axis (``abundance``: ~40 short genes plus the
-  ribosomal genes, all set to comparable high levels as real RP genes are, scaled per cell by a
-  cytoplasmic factor lognormal(0, 0.35), so %ribo tracks it) and a gene-length axis
-  (``long_genes``: ~40 genes of 150-800 kb scaled by 1 + 2n, n ~ Beta(2, 5) the nuclear/intronic
-  fraction; ``obs["intronic_fraction"]`` = n plus N(0, 0.03) noise). Both use genes outside the
-  other planted sets and the CNA arm.
+  ribosomal genes, all set to comparable high levels as real RP genes are, together about a third
+  of the library; scaled per cell by c ** ``CYTO_GAMMA`` = c ** 2, c ~ lognormal(0, 0.35) the
+  planted cytoplasmic factor, so %ribo tracks it) and a gene-length axis (``long_genes``: ~40 genes
+  of 150-800 kb scaled by 1 + ``LONG_K`` n = 1 + 20 n, n ~ Beta(2, 5) the nuclear/intronic
+  fraction: exonic reads plus intronic reads, which these long genes collect at 21 times their
+  exonic rate, in proportion to n; ``obs["intronic_fraction"]`` = n plus N(0, 0.03) noise). Both
+  use genes outside the other planted sets and the CNA arm. The magnitudes were calibrated so that
+  the standard pipeline can see the axes (below).
 * ``protocol_capture_bias``: under the fixed protocol every gene's rate is multiplied by a
   per-gene capture efficiency (lognormal(0, 0.4), the same vector in all fixed samples). It moves
   gene-set intensities between protocols but not co-expression.
@@ -44,14 +47,53 @@ Technical effects:
 ``var`` holds ``chromosome``, ``start``, ``gene_length`` (lognormal, median ~25 kb, clipped to
 1 kb-2.5 Mb; drawn from the 2-8 kb and 150-800 kb ranges for the two axes) and ``end``.
 
+Calibration of the technical axes. With the first magnitudes (c ** 1 and 1 + 2 n) the standard
+pipeline could not see either axis: on ``simulate_cohort(seed=0)`` no per-sample NMF program, robust
+or not, had more than 1 abundance or 6 long genes in its top 50, while each planted biology program
+was robust in 9-16 of the 16 samples. The planted change was too small for log2(CPM/10 + 1): the
+abundance genes make up a third of the library, so normalisation removes about a third of their
+log-fold (and spreads it thinly over all other genes), and the long genes, drawn from all
+expression levels, are mostly sparse, so counting noise swamps a 1.9-fold (p95/p5) change. The SD
+across a sample's malignant cells of the planted log2 rate was 0.33 per abundance gene and 0.34 per
+long gene, against 0.6-0.8 for the genes of cycle, hypoxia, EMT and IFN. The magnitudes were then
+raised, with every random draw unchanged, against a target fixed before any audit was run: with the
+reference pipeline at the demo settings (``GavishParams(nrun=10, min_genes_per_cell=0)``, recurrence
+by tumour), each axis must put >= 10 of its genes into one robust program in >= 8 of the 16
+samples. ``CYTO_GAMMA`` 2 is the smallest value tried that meets it (1.75: 5 samples); with it,
+``LONG_K`` 10 does not (6 samples) and 14-24 do. At 2 and 20 the abundance and long-gene axes
+appear in 13 and 11 samples, each forms its own MP, and the planted log2-rate SD is 0.65 and 0.80
+per gene, in the range of the biology programs. The cost is competition for the fixed ranks 4-9:
+robust appearances went from 16, 13, 9 and 10 samples to 16, 13, 7 and 9 for cycle, hypoxia, EMT and
+IFN, from 11 to 8 for contamination and from 8 to 5 for the CNA; stress stayed at 9. Neighbouring
+magnitudes move these counts by 2-3 samples either way; at ``LONG_K`` 14, EMT fell to 6 samples and
+lost its MP. All counts are toy results at seed 0. Resulting magnitudes (malignant cells, medians
+over samples): %ribo p5-p95 10-42% within a sample, SD of log %ribo 0.45 (previously 16-35% and
+0.24); within-sample Spearman of the abundance score (mean log expression of its non-ribosomal
+genes) with %ribo 0.90, against 0.68-0.77 in the user-reported breast cancer snRNA-seq cohort
+(docs/05_pilot_P1.md; the toy axis is cleaner because only c and counting noise move %ribo here);
+long-gene rate p95/p5 within a sample 5.7 (previously 1.9), the long genes' share of counts about 6%
+(previously 1.6%), and Spearman of that share with ``intronic_fraction`` 0.84. Side effect: with a
+third of the library on one factor, every other gene is diluted by the same per-cell factor, so
+after total-count normalisation all genes co-vary a little: the latent correlation (``kappa``) of
+random 30-gene sets of unplanted genes in malignant cells is about 0.23 (0.09 before; medians over
+samples), more in cohorts with fewer genes. Seed-0 numbers derived from the default cohort before
+the calibration (e.g. in tests and docstrings of other modules) changed with it. Mechanism tests of
+other axes that should not depend on the technical axes (the TME spillover tests and the protocol
+activity-gate test) build their cohorts at the first magnitudes (:func:`axis_magnitudes` with
+``FIRST_MAGNITUDES``).
+
 Covariates in ``obs``: ``clone``, ``doublet_score`` and ``contamination`` are TRUE values (the
 planted clone; a score drawn from the true doublet status; the planted ambient fraction plus
 N(0, 0.01), from TME cells for malignant cells and from malignant cells for TME cells).
-``estimated_covariates`` adds what an analyst would compute from counts, cell-type labels and
-gene positions only, never from the truth: ``clone_est`` (inferCNV-like two-group split on the
-arm whose genes co-vary most), ``contamination_est`` (DecontX-like: share of counts on genes
-specific to the other compartment, relative to the soup) and ``doublet_est`` (expression-based:
-contamination estimate and library size). They are crude on purpose: they err, and the doublet
+``intronic_fraction`` is the planted nuclear fraction plus N(0, 0.03), a near-true readout standing
+in for a covariate measured from reads (STARsolo Velocyto, velocyto or DropletQC), so recruitment of
+the long genes by a decoy arm conditioned on it is true by construction. ``pct_ribo``, added by
+:func:`mpaudit.data.add_qc_obs`, is computed from the counts. ``estimated_covariates`` adds what an
+analyst would compute from counts, cell-type labels and gene positions only, never from the truth:
+``clone_est`` (inferCNV-like two-group split on the arm whose genes co-vary most),
+``contamination_est`` (DecontX-like: share of counts on genes specific to the other compartment,
+relative to the soup) and ``doublet_est`` (expression-based: contamination estimate and library
+size). They are crude on purpose: they err, and the doublet
 estimate tracks cell size and hence cycling. Because TME-enriched genes can include planted
 program genes, ``contamination_est`` (and ``doublet_est``, built from it) can also track a program
 by gene overlap; whether and how much depends on the seed (compare ``truth["tme_enriched"]`` with
@@ -72,6 +114,8 @@ gives the null cohort for the P1 rule (see :func:`simulate_cohort`).
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -85,8 +129,26 @@ FIB_MARKERS = ["COL1A1", "COL1A2", "COL3A1", "DCN", "LUM"]
 RIBO = [f"RPL{i}" for i in range(3, 13)] + [f"RPS{i}" for i in range(2, 12)]
 MITO = ["MT-CO1", "MT-CO2", "MT-CO3", "MT-ND1", "MT-ND2", "MT-ND4", "MT-CYB", "MT-ATP6"]
 AXIS_SIZE = 40  # genes on each technical axis (abundance, long genes)
+CYTO_GAMMA = 2.0  # abundance-axis genes scale with cytoplasmic factor ** CYTO_GAMMA (calibrated)
+LONG_K = 20.0  # long-axis genes scale with 1 + LONG_K * nuclear fraction (calibrated)
+FIRST_MAGNITUDES = (1.0, 2.0)  # (CYTO_GAMMA, LONG_K) before the 2026-10-17 recalibration
 N_LINEAGE = 10  # malignant lineage markers
 SPECIFIC_FOLD = 8.0  # mean-CPM ratio defining compartment-specific genes for contamination_est
+
+
+@contextlib.contextmanager
+def axis_magnitudes(cyto_gamma: float, long_k: float):
+    """Within the block, cohorts are simulated with ``CYTO_GAMMA = cyto_gamma`` and ``LONG_K = long_k``
+    (restored on exit). ``axis_magnitudes(*FIRST_MAGNITUDES)`` gives the technical axes at their first
+    magnitudes, for ablations and for mechanism tests of other axes that should not depend on them
+    (no random draw changes, see :func:`simulate_cohort`)."""
+    global CYTO_GAMMA, LONG_K
+    old = CYTO_GAMMA, LONG_K
+    CYTO_GAMMA, LONG_K = float(cyto_gamma), float(long_k)
+    try:
+        yield
+    finally:
+        CYTO_GAMMA, LONG_K = old
 
 
 def _counts(rate: np.ndarray, depth: np.ndarray, theta: float, rng: np.random.Generator) -> np.ndarray:
@@ -236,12 +298,17 @@ def simulate_cohort(
     coupling, capture bias), which is the null cohort for the P1 rule. ``estimated_covariates=False``
     leaves out ``clone_est``, ``contamination_est`` and ``doublet_est``, and ``technical_axes=False``
     the ``abundance`` and ``long_genes`` sets (``intronic_fraction`` is then uninformative noise).
-    ``truth`` holds the planted gene sets (``sets``) and their kinds (``kinds``), a cytoband table,
-    the private programs, which tumours carry IFN/EMT/CNA, ``expected_tme_shared``,
+    ``intronic_fraction`` is always the planted nuclear fraction plus N(0, 0.03): a near-true
+    readout standing in for a read-level measurement, not an estimate from the counts. The axis
+    magnitudes ``CYTO_GAMMA`` and ``LONG_K`` are module constants calibrated for the default
+    arguments (module docstring); they act only when ``technical_axes`` is on and change no random
+    draw. ``truth`` holds the planted gene sets (``sets``) and their kinds (``kinds``), a cytoband
+    table, the private programs, which tumours carry IFN/EMT/CNA, ``expected_tme_shared``,
     ``hypoxia_fraction_by_sample``, ``tme_ambient_scale_by_sample``, ``malignant_markers``,
     ``tme_enriched`` (TME cell type -> its 30 TME-enriched genes; may overlap planted programs),
     ``capture_efficiency`` (per gene; ones when off) and ``cells``: per-cell planted state (program
-    activity, doublet, cytoplasmic factor, nuclear fraction), indexed like ``adata.obs``.
+    activity, doublet, cytoplasmic factor c as drawn (abundance genes scale with c **
+    ``CYTO_GAMMA``), nuclear fraction), indexed like ``adata.obs``.
     """
     import anndata as ad
 
@@ -324,9 +391,9 @@ def simulate_cohort(
         """Scale the technical axes in ``r`` in place; return cytoplasmic factor, nuclear fraction, its readout."""
         cyto_f = rng_tech.lognormal(0.0, 0.35, r.shape[0])
         nuc = rng_tech.beta(2.0, 5.0, r.shape[0])
-        if technical_axes:
-            r[:, abund_idx] *= cyto_f[:, None]
-            r[:, long_genes] *= (1 + 2 * nuc)[:, None]
+        if technical_axes:  # magnitudes act on the draws, never change them (paired ablations, null cohort)
+            r[:, abund_idx] *= (cyto_f ** CYTO_GAMMA)[:, None]
+            r[:, long_genes] *= (1 + LONG_K * nuc)[:, None]
         return cyto_f, nuc, np.clip(nuc + rng_tech.normal(0, 0.03, r.shape[0]), 0, 1)
 
     tumours = [f"T{t + 1:02d}" for t in range(n_tumours)]

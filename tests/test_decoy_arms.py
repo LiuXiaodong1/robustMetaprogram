@@ -4,9 +4,10 @@ import pandas as pd
 import pytest
 
 from mpaudit import GavishParams, Keys, NMFCache
+from mpaudit.gavish import DECOY_TAG
 from mpaudit.data import get_counts, malignant_mask
 from mpaudit.decoy import (PER_DECOY_COLUMNS, PER_MP_COLUMNS, _covariates, _glm_mean, _strata, decoy_recruitment,
-                           kappa_retained, make_decoy)
+                           decoy_tag, kappa_retained, make_decoy)
 from mpaudit.sim import simulate_cohort
 
 KEYS = Keys(sample="sample", malignant="malignant", tumour="tumour", study="study")
@@ -108,10 +109,16 @@ def test_arm_output_format_and_typing(cohort, sets):
     np.testing.assert_allclose(per_mp["recruitment"], per_mp["hits"] / per_mp["n_decoys"])
     assert (per_mp["max_best_jaccard"] >= per_mp["mean_best_jaccard"]).all()
     assert len(per_decoy) == len(ARMS) * 2 and set(per_decoy["decoy"]) == set(decoy_mps)
+    # NMF fit diagnostics of each decoy cohort: samples x ranks x nrun fits, of which some capped or failed
+    n_samples = cohort[0].obs.loc[malignant_mask(cohort[0], KEYS), "sample"].nunique()
+    assert (per_decoy["n_fits"] == n_samples * len(PARAMS.ranks) * PARAMS.nrun).all()
+    assert per_decoy["n_capped_fits"].between(0, per_decoy["n_fits"]).all()
+    assert per_decoy["n_failed_fits"].between(0, per_decoy["n_fits"]).all()
     tech = per_decoy.loc[per_decoy["arm"] == "technical", "decoy"]
     assert tech.str.contains("contamination_est+doublet_est", regex=False).all()  # sorted columns in the cache tag
     assert tech.str.contains("-residual-").all() and tech.str.contains("-d1-").all()
-    assert set(tech.str.extract(r"-s(\d+)$")[0]) == {"1000", "1001"}
+    assert per_decoy["decoy"].str.startswith(DECOY_TAG).all()  # so the cache key hashes the decoy generator
+    assert set(tech.str.extract(r"-s(\d+)-[0-9a-f]{12}$")[0]) == {"1000", "1001"}
 
     kr = per_mp.set_index(["arm", "mp"])["kappa_retained"]
     assert kr["dosage", "CNA_7q"] >= 0.5 > kr["technical", "CNA_7q"]  # clone arm types CNA as dosage
@@ -128,3 +135,22 @@ def test_arm_output_format_and_typing(cohort, sets):
 
     with pytest.raises(ValueError):
         decoy_recruitment(adata, KEYS, PARAMS, sets, arms=ARMS, strata=("clone_est",))
+
+
+def test_decoy_tag_follows_every_argument_and_the_covariate_values(cohort):
+    """The cache tag is built from the make_decoy call itself, defaults included, and from the values it
+    conditions on: with method="permute" changed covariate values leave the counts' totals unchanged."""
+    adata, _ = cohort
+    kw = dict(counts_layer="counts", strata=("clone_est",), method="permute", seed=1)
+    tag = decoy_tag(adata, KEYS, **kw)
+    assert tag.startswith(f"{DECOY_TAG}permute-clone_est-d1-s1-")
+    assert decoy_tag(adata, KEYS, **kw, n_cont_bins=3) == tag         # a default passed explicitly
+    assert decoy_tag(adata, KEYS, **kw, min_stratum_cells=25) != tag  # any other argument
+    assert decoy_tag(adata, KEYS, **{**kw, "seed": 2}) != tag
+    moved = adata.copy()
+    assert decoy_tag(moved, KEYS, **kw) == tag
+    vals = moved.obs["clone_est"].to_numpy().copy()
+    rows = np.flatnonzero(malignant_mask(moved, KEYS))
+    vals[rows] = vals[np.roll(rows, 1)]  # the same column name and labels, other values in malignant cells
+    moved.obs["clone_est"] = pd.Series(vals, index=moved.obs.index, dtype=moved.obs["clone_est"].dtype)
+    assert decoy_tag(moved, KEYS, **kw) != tag

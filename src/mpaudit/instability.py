@@ -2,7 +2,14 @@
 
 Perturbs one choice at a time (NMF seed, rank grid, filter/clustering thresholds, gene universe,
 leave-one-study-out, cell bootstrap) and matches each perturbed MP set back to the reference run.
-Fits are cached, so threshold and leave-study-out perturbations cost no NMF.
+Fits are cached, so threshold and leave-study-out perturbations cost no NMF. Each perturbation row
+(``instability_runs.csv``) carries the run's NMF fit counts (``n_fits``, ``n_capped_fits``,
+``n_failed_fits``; see :mod:`mpaudit.gavish`).
+
+With few tumours per study, leave-one-study-out can remove enough programs that an MP no longer has
+more than ``min_group_size`` founder partners; low leave-one-study-out recall on small cohorts (e.g.
+the 10-tumour toy of :mod:`mpaudit.sim`, where a study holds 3-4 tumours and EMT, IFN and the CNA
+are planted in 5, 6 and 7 tumours) is then mechanical, not evidence of instability.
 
 Method variants (kind ``"method_variant"``; currently ``uncentred``, NMF without gene centring)
 change the method rather than an arbitrary setting, and an MP that does not survive them is not
@@ -102,7 +109,9 @@ def run_instability(
 
     Every perturbed :class:`GavishParams` is built and checked (:func:`mpaudit.gavish.check_keys`)
     before the first fit, so a bad perturbation fails before any NMF rather than after the
-    reference and the perturbations before it.
+    reference and the perturbations before it. Each row of ``summary`` carries the NMF fit
+    diagnostics of its run (``n_fits``, ``n_capped_fits`` stopped at ``max_iter``,
+    ``n_failed_fits`` stopped by the restart limit; fits served from the cache are counted again).
     """
     perturbed = [base.replace(**p.params) for p in perturbations]
     for params in [base, *perturbed]:
@@ -130,7 +139,8 @@ def run_instability(
         m = match_sets(ref_sets, alt, min_jaccard)
         matches[p.name] = (m, alt)
         rows.append({"perturbation": p.name, "kind": p.kind, "n_robust": len(res.robust),
-                     **summarize_match(m, len(alt))})
+                     **summarize_match(m, len(alt)), "n_fits": res.n_fits, "n_capped_fits": res.n_capped_fits,
+                     "n_failed_fits": res.n_failed_fits})
         log(f"[instability] {p.name}: {len(alt)} MPs, recall {rows[-1]['recall']:.2f}")
     summary = pd.DataFrame(rows)
 

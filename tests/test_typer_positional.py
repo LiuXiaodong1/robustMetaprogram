@@ -8,7 +8,8 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from mpaudit.data import Keys, add_qc_obs, qc_metrics
+from mpaudit import typer
+from mpaudit.data import LONG_GENE_BP, Keys, add_qc_obs, qc_metrics
 from mpaudit.positional import assign_arms, gene_lengths, gene_positions_from_gtf
 from mpaudit.sim import simulate_cohort
 from mpaudit.typer import typer_features
@@ -55,6 +56,32 @@ def test_add_qc_obs_warns_without_matching_genes():
         add_qc_obs(a, counts_layer="counts")
     assert sorted(str(w.message).split("; ")[1].split()[0] for w in record) == ["pct_mito", "pct_ribo"]
     assert (a.obs["pct_mito"] == 0).all() and (a.obs["pct_ribo"] == 0).all()
+
+
+# genomic spans: GAPDH and the kinase long, RPL3 short, the others unknown (not long)
+QC_LENGTHS = pd.Series({"GAPDH": 150_000, "RPS6KA1": LONG_GENE_BP + 1, "RPL3": 5_000, "UNUSED": 900_000})
+
+
+def test_qc_metrics_pct_long():
+    assert typer.LONG_GENE_BP is LONG_GENE_BP  # one constant for the typer and pct_long
+    assert "pct_long" not in qc_metrics(sp.csr_matrix(QC_COUNTS), QC_GENES)
+    qc = qc_metrics(sp.csr_matrix(QC_COUNTS), QC_GENES, gene_length=QC_LENGTHS)
+    np.testing.assert_allclose(qc["pct_long"], [45.0, 0.0, 50.0])  # (4 + 5) / 20; empty cell; 5 / 10
+
+
+def test_add_qc_obs_pct_long_needs_gene_lengths():
+    a = _tiny_adata()
+    add_qc_obs(a, counts_layer="counts")
+    assert "pct_long" not in a.obs  # no lengths: no column
+    a.var["gene_length"] = QC_LENGTHS.reindex(QC_GENES).to_numpy()
+    add_qc_obs(a, counts_layer="counts")  # lengths in var are found
+    np.testing.assert_allclose(a.obs["pct_long"], [45.0, 0.0, 50.0])
+    b = _tiny_adata()
+    add_qc_obs(b, counts_layer="counts", gene_length=pd.Series({"RPL3": 200_000}))  # given lengths (e.g. a GTF)
+    np.testing.assert_allclose(b.obs["pct_long"], [15.0, 0.0, 50.0])
+    c = _tiny_adata()
+    with pytest.warns(UserWarning, match="pct_long is 0 for every cell"):
+        add_qc_obs(c, counts_layer="counts", gene_length=pd.Series({"ENSG1": 200_000}))  # names do not match
 
 
 def test_keys_intronic():

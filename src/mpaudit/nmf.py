@@ -19,7 +19,10 @@ objective has dropped by less than a relative ``tol`` [1e-5] since the previous 
 when the row/column argmax assignments of ``W`` and ``H`` have not changed for 10 consecutive tests
 and the KKT residual has fallen to 1e-4 of its first value. The iteration cap is ``max_iter``
 [5,000]; R's default is 20,000. Fits that stop at the cap are counted (``return_info``, and
-``GavishResult.n_capped_fits`` in :mod:`mpaudit.gavish`). Results are therefore not
+``GavishResult.n_capped_fits`` in :mod:`mpaudit.gavish`); :func:`mpaudit.pipeline.run_p1` reports
+capped and restart-limit counts for the reference run, each decoy cohort (``decoy_runs.csv``) and
+each instability perturbation (``instability_runs.csv``), with totals in ``run_config.json``
+(``nmf_fits``) and ``summary.md``. Results are therefore not
 bit-identical to R. Contrasts between perturbations inside ``mpaudit`` are like-for-like; check
 parity with the R code before quoting absolute numbers.
 

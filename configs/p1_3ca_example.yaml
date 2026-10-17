@@ -1,8 +1,21 @@
 # Example P1 configuration for a 3CA-style cohort (adapt column names to your AnnData).
 # Run:  mpaudit p1 cohort.h5ad --config configs/p1_3ca_example.yaml --out results/p1 --n-jobs 8
-# Fill in the `decision` block (pre-declared lists) and freeze this file BEFORE running on real data.
+# Fill in the `decision` block (pre-declared lists), the decoy arms and the curated-artefact labels
+# (typer.labels / typer.labelled_gmt), then freeze and register this whole file with the mpaudit commit
+# BEFORE running on real data.
+# The rule P1-GO v1.2 reads the decision thresholds AND settings outside the decision block (min_jaccard, seed,
+# decoy.enabled/n/method/n_depth_bins/min_kappa/n_null_floor, tme.spillover_adjust/rho_sensitivity/
+# null_match/n_null/min_cells/n_markers/min_marker_fold, protocol.kappa_min_effect/kappa_active/min_pairs/
+# n_null_sets, positional.enabled). The values below are the registered ones; mpaudit refuses any other value
+# (larger null sizes too: they re-draw the random sets) unless unregistered_variant is true, and then labels the
+# verdict "P1-GO v1.2 (unregistered variant: ...)". It also refuses a config in which an exclusion of the rule
+# cannot run: mps: rederive without typer.labels and typer.labelled_gmt, no decoy arm in decision.dosage_arms,
+# or the positional axis without a cytoband or gene positions.
+# What mpaudit does not compare (arm contents, pre-declared lists, label files, gavish, tme.covariates, keys,
+# protocol names, tme/protocol enabled) is registered by freezing this file; compare run_config.json with it.
 # The whole file is checked before any NMF runs (unknown or pre-v1.0 decision keys, decoy arms not named in
-# the rule, names that cannot match re-derived MPs, missing files): `mpaudit p1` stops with the reason.
+# the rule, arm columns missing from obs or with NaN in malignant cells, names that cannot match re-derived
+# MPs, missing files, deviations from the registered rule): `mpaudit p1` stops with the reason.
 # Write floats with a decimal point (1.0e-8, not 1e-8): YAML reads 1e-8 as a string.
 keys:
   sample: sample            # NMF unit (one tumour sample)
@@ -15,15 +28,21 @@ keys:
   protocol: protocol        # e.g. fresh / fixed / nuclei; needed for the protocol axis
   clone: clone              # optional: CNA clone labels (Numbat/CopyKAT)
   doublet: doublet_score    # optional: scDblFinder score
-  intronic: intronic_fraction  # optional: per-cell intronic/unspliced fraction (STARsolo/velocyto)
+  intronic: intronic_fraction  # optional: per-cell intronic/unspliced fraction (STARsolo/velocyto on raw reads;
+                               # 3CA matrices carry no intronic/unspliced counts)
 counts_layer: counts        # raw integer UMI counts (null = adata.X)
 recurrence_key: patient     # a tumour must not "recur" with its own second sample
 mps: rederive               # or a GMT of published MPs, e.g. the Gavish 2023 / 3CA v2 lists. Re-derived MPs are
                             # named MP1, MP2, ... by the run: pre-declare their exclusions as gene sets
 n_jobs: 8
 cache_dir: nmf_cache        # NMF fits are reused across perturbations and re-runs
+min_jaccard: 0.3            # registered: MP match threshold for decoy hits (criterion a), label carry-over and
+                            # instability recovery
+unregistered_variant: false # true runs a config that deviates from the registered rule, labelled as a variant
+seed: 0                     # registered: decoys, random-gene-set nulls and cell subsamples
 qc:
-  add_obs: true             # adds log_umi, log_genes, pct_mito, pct_ribo to obs if missing
+  add_obs: true             # adds log_umi, log_genes, pct_mito, pct_ribo to obs if missing, and pct_long (% of
+                            # counts on genes > 100 kb) when gene lengths exist (positional.gtf or var gene_length)
 
 gavish:                     # 3CA defaults; listed here to make the audited setting explicit
   ranks: [4, 5, 6, 7, 8, 9]
@@ -47,47 +66,71 @@ instability:
   leave_one_study_out: true
 
 decoy:
-  enabled: true
-  n: 5                      # the rule needs >= 2 hits among >= 5 decoys per arm
-  method: residual
+  enabled: true             # registered: the dosage arm is one of the two dosage exclusions
+  n: 5                      # registered: the rule needs >= 2 hits among these 5 decoys per arm
+  method: residual          # registered
   arms:                     # categorical columns -> permutation strata; continuous -> mean model; every arm
                             # must be listed in decision.technical_arms or decision.dosage_arms
     technical: [doublet_score, contamination, pct_ribo, intronic_fraction]  # add DecontX/SoupX estimates
-    dosage: [clone]         # CNA clone recruitment types an MP as dosage, not nuisance
-  n_depth_bins: 1
+    # intronic_fraction only if present: 3CA matrices carry no intronic/unspliced counts, so it needs STARsolo
+    # (Velocyto features), velocyto or DropletQC on the raw reads. A listed column missing from obs stops the
+    # run, and so does one with NaN in malignant cells: drop it from the arm, impute it, or set one constant for
+    # every cell of a sample without it (a column constant within a sample conditions nothing there).
+    # pct_long (from gene lengths) is a fallback for the long-gene axis where intronic_fraction is missing; like
+    # pct_ribo it is computed from counts that include the audited MP's own genes, so it can inflate a long-gene
+    # MP's kappa_retained. It is not in the registered arm by default.
+    dosage: [clone]         # CNA clone recruitment types an MP as dosage, not nuisance; the registered rule
+                            # needs an arm named in decision.dosage_arms
+  n_depth_bins: 1           # registered (depth enters the mean model; depth strata leak real co-expression)
+  min_kappa: 0.02           # registered: kappa_retained uses samples where the MP's kappa exceeds this and the
+  n_null_floor: 20          # q95 of this many matched random gene sets (registered)
 
 tme:
   enabled: true
-  min_cells: 20
+  min_cells: 20             # registered: (sample, cell type) groups with fewer TME cells are left out
   n_boot: 200
-  n_null: 500               # random gene sets matched on expression and malignant specificity
+  n_null: 500               # random gene sets matched on expression and malignant specificity (registered)
+  null_match: expression+specificity  # registered
+  n_markers: 50             # registered: malignant-specific markers behind rho_hat
+  min_marker_fold: 8.0      # registered
   covariates: [cancer_type]
   spillover_adjust: true    # subtract predicted malignant->TME ambient spillover (criterion b needs it)
-  rho_sensitivity: 1.5      # re-run with every rho_hat x 1.5; criterion (b) must hold there too (null: off)
+  rho_sensitivity: 1.5      # re-run with every rho_hat x 1.5; criterion (b) must hold there too. Registered:
+                            # null (re-run off) or any other factor is an unregistered variant
 
 positional:
-  enabled: true
+  enabled: true             # registered: arm enrichment is one of the two dosage exclusions; without a cytoband
+                            # or gene positions (GTF, or chromosome/start in var) it cannot run, a deviation
   cytoband: ref/cytoBand.hg38.txt.gz   # UCSC cytoBand table
-  gtf: ref/gencode.v44.basic.annotation.gtf.gz   # also gives gene lengths for the typer
+  gtf: ref/gencode.v44.basic.annotation.gtf.gz   # also gives gene lengths for the typer and pct_long
 
 typer:
   enabled: true
-  labels: null              # CSV (mp,label): 1 for curated artefacts, e.g. the 11 MPs removed by hand in 3CA v2
+  labels: null              # CSV (mp,label): 1 for curated artefacts, e.g. the 11 MPs removed by hand in 3CA v2.
+                            # Fill in and register. With mps: rederive a run without labels and labelled_gmt is
+                            # refused as an unregistered variant (no rediscovered curated artefact would be
+                            # excluded); with mps: <GMT> it is warned about
   labelled_gmt: null        # GMT of the labelled (published) MPs, keyed like `labels`; needed with mps: rederive,
-                            # where each re-derived MP takes the label of its best match (Jaccard >= 0.3)
+                            # where each re-derived MP takes the label of its best match (Jaccard >= min_jaccard);
+                            # labels by name for re-derived MPs are an unregistered variant. The gene sets of the
+                            # 11 MPs removed by hand in 3CA v2 are not published and have not been rebuilt yet
 
 protocol:
   enabled: true
   reference: fresh
   test: fixed
   min_pairs: 3              # distinct tumours with same-protocol replicate pairs needed for the replicate null
-  n_null_sets: 100          # otherwise random matched gene sets in the same paired tumours
-  kappa_min_effect: 0.4054651  # log(1.5): a kappa loss must also exceed 1.5-fold to count
+                            # (registered; a larger value sends MPs to the narrower random-set null)
+  n_null_sets: 100          # otherwise random matched gene sets in the same paired tumours (registered)
+  kappa_min_effect: 0.4054651  # log(1.5), registered: a kappa loss must also exceed 1.5-fold to count
+  kappa_active: 0.05        # registered: a paired tumour is tested only where the MP's kappa under the reference
+                            # or the test protocol exceeds max(kappa_active, q95 of the matched random sets' kappa)
 
-decision:                   # P1-GO v1.1; defaults shown, pre-declared lists must be filled in
+decision:                   # P1-GO v1.2; registered thresholds shown, pre-declared lists must be filled in
   expected_tme_shared: []   # names of audited MPs expected to co-vary with TME cells while real (e.g. IFN/MHC-II,
                             # hypoxia); only with mps: <GMT> (names of re-derived MPs are not known in advance)
   expected_tme_shared_gmt: null   # gene sets; an MP overlapping one by >= min_overlap genes is excluded from (b)
+  expected_tme_shared_sets: {}    # inline alternative to the GMT: {name: [gene, ...]}
   min_overlap: 10
   technical_arms: [technical]
   dosage_arms: [dosage]
@@ -100,3 +143,4 @@ decision:                   # P1-GO v1.1; defaults shown, pre-declared lists mus
   protocol_frac: 0.5
   positional_q: 0.05
   min_mps: 3
+  unstable_recovery: 0.5    # informational only: MPs with recovery_all below this get info_unstable in mp_flags.csv
