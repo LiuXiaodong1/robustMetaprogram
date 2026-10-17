@@ -249,17 +249,20 @@ total-UMI normalisation.
 - Power was checked only at an effect far above the floor. The power cost of the floor for
   weak programs was not simulated.
 
-## Implications for 02
+## Implications for 02 (applied in its 2026-10-17 revision)
 
-- **02 §1.3, the specificity bullet.** It says conditioning plus an effect-size null "removes
-  that failure". That holds only for the conditioning part, and only when the overlapping
-  program is in the dictionary (B1, <= 1%). The empirical null of `ref2_sim2.out` and the
-  matched-random null band in the new check do not help. The floor helps only while the
-  overlap kappa is below 0.05.
+- **02 §1.3, the specificity bullet.** It used to say that conditioning plus an effect-size null
+  "removes that failure". That holds only for the conditioning part, and only when the
+  overlapping program is in the dictionary (B1, <= 1%). The empirical null of `ref2_sim2.out` and
+  the matched-random null band in the new check do not help; the floor helps only while the
+  overlap kappa is below 0.05. 02 now says this.
 - **02 §6.3, the specificity row.** The ref1 figures (72% at 5/40, 100% at 10/40) are rejections
-  of a null that is false. Comparing them with a <= 5% false-membership target contrasts two
-  estimands; it is not a type I error comparison. The comparable figures for the proposed
-  estimand are the B1 and B2 rows above.
+  of a null that is false; comparing them with a <= 5% false-membership target contrasts two
+  estimands. 02 no longer makes that comparison and quotes the B1/B2 rows instead.
+- **03 (design panel record).** Referee 2's report on CALIPER (03_design_panel.md, line 1453) also
+  states "at fold change 1.5 the 10/40 rate was 55%". No saved output backs that figure:
+  `ref1_check.py` hard-codes fold change 2.5. 03 is kept as a historical record; do not cite that
+  number.
 
 ## Running
 

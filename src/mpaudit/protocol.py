@@ -59,8 +59,9 @@ scale: the null is wide for κ (only large losses pass) and, when nearly all ran
 in both protocols, collapses to 0 (then reported as untestable: NaN). Prevalence has no random-set
 null (its threshold would need every random set scored on the whole pool).
 
-**Data.** Oliveira et al. (Nat Genet 2025) is NOT a fresh-vs-fixed twin: all tumour tissue was FFPE
-and only sorted T cells were profiled fresh, so it has no fresh-vs-fixed malignant contrast.
+**Data.** Oliveira et al. (Nat Genet 2025) is NOT a fresh-vs-fixed twin: its Chromium Flex, Visium HD
+and Xenium data come from the same FFPE blocks and no fresh-dissociated malignant cells were found,
+so it offers a fixed-dissociated versus in situ comparison, not a fresh-vs-fixed malignant contrast.
 
 Effects on the toy cohort (:mod:`mpaudit.sim`) are true by construction; they show that the code
 responds as designed, not how often real MPs change between protocols.
