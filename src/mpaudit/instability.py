@@ -1,8 +1,13 @@
 """Pilot P1a: how much do 3CA-style MPs move when arbitrary choices change?
 
 Perturbs one choice at a time (NMF seed, rank grid, filter/clustering thresholds, gene universe,
-centring, leave-one-study-out, cell bootstrap) and matches each perturbed MP set back to the
-reference run. Fits are cached, so threshold and leave-study-out perturbations cost no NMF.
+leave-one-study-out, cell bootstrap) and matches each perturbed MP set back to the reference run.
+Fits are cached, so threshold and leave-study-out perturbations cost no NMF.
+
+Method variants (kind ``"method_variant"``; currently ``uncentred``, NMF without gene centring)
+change the method rather than an arbitrary setting, and an MP that does not survive them is not
+unstable. They are reported in their own column (``recovery_method_variant``) and summary rows,
+and are left out of ``recovery_all``, ``median_best_jaccard`` and the gene-frequency table.
 """
 from __future__ import annotations
 
@@ -14,6 +19,8 @@ import pandas as pd
 from .compare import match_sets, summarize_match
 from .data import Keys, sample_map
 from .gavish import GavishParams, GavishResult, NMFCache, assemble, compute_programs
+
+METHOD_VARIANT = "method_variant"
 
 
 @dataclass
@@ -34,11 +41,12 @@ def default_perturbations(
     rank_grids: tuple[tuple[int, ...], ...] = ((3, 4, 5, 6, 7, 8), (5, 6, 7, 8, 9, 10), (4, 5, 6)),
     threshold_steps: dict | None = None,
     universes: tuple[tuple[str, int], ...] = (("top_mean", 5000), ("hvg", 2000), ("hvg", 5000)),
-    uncentred: bool = True,
+    method_variants: bool = True,
     n_boot: int = 3,
     boot_fraction: float = 0.8,
 ) -> list[Perturbation]:
-    """A one-factor-at-a-time grid around ``base``."""
+    """A one-factor-at-a-time grid around ``base``; ``method_variants`` adds the method variants
+    (reported separately, see the module docstring)."""
     out: list[Perturbation] = []
     for s in seeds:
         out.append(Perturbation(f"seed={s}", "seed", {"seed": s}))
@@ -56,8 +64,8 @@ def default_perturbations(
     for u, n in universes:
         if (u, n) != (base.gene_universe, base.n_universe):
             out.append(Perturbation(f"universe={u}{n}", "universe", {"gene_universe": u, "n_universe": n}))
-    if uncentred and base.center:
-        out.append(Perturbation("uncentred", "center", {"center": False}))
+    if method_variants and base.center:
+        out.append(Perturbation("uncentred", METHOD_VARIANT, {"center": False}))
     for study, samples in (study_samples or {}).items():
         out.append(Perturbation(f"leave_out={study}", "loso", drop_samples=tuple(samples)))
     for b in range(n_boot):
@@ -117,17 +125,18 @@ def run_instability(
     summary = pd.DataFrame(rows)
 
     per_mp_rows, gene_rows = [], []
-    kinds = sorted({p.kind for p in perturbations})
+    kinds = sorted({p.kind for p in perturbations} | {METHOD_VARIANT})
+    stability = [p.name for p in perturbations if p.kind != METHOD_VARIANT]
     for mp, genes in ref_sets.items():
         rec = {"mp": mp, "n_genes": len(genes)}
-        jacs = []
         for kind in kinds:
             names = [p.name for p in perturbations if p.kind == kind]
             hits = [bool(matches[n][0].set_index("ref").loc[mp, "matched"]) for n in names]
             rec[f"recovery_{kind}"] = float(np.mean(hits)) if hits else np.nan
-        all_hits = []
+        all_hits, jacs = [], []
         gene_hits = {g: 0 for g in genes}
-        for name, (m, alt) in matches.items():
+        for name in stability:
+            m, alt = matches[name]
             row = m.set_index("ref").loc[mp]
             all_hits.append(bool(row["matched"]))
             jacs.append(float(row["best_jaccard"]))
@@ -137,7 +146,7 @@ def run_instability(
         rec["recovery_all"] = float(np.mean(all_hits)) if all_hits else np.nan
         rec["median_best_jaccard"] = float(np.median(jacs)) if jacs else np.nan
         per_mp_rows.append(rec)
-        n = max(len(matches), 1)
+        n = max(len(stability), 1)
         gene_rows += [{"mp": mp, "gene": g, "frequency": c / n} for g, c in gene_hits.items()]
     return InstabilityResult(reference=ref, runs=runs, summary=summary,
                              per_mp=pd.DataFrame(per_mp_rows), genes=pd.DataFrame(gene_rows))

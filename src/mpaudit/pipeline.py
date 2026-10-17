@@ -1,4 +1,5 @@
-"""Pilot P1 runner: audit a set of MPs (re-derived or published) along every available axis."""
+"""Pilot P1 runner: audit a set of MPs (re-derived or published) along every available axis and
+apply the frozen GO rule (:mod:`mpaudit.report`, ``P1-GO v1.0``)."""
 from __future__ import annotations
 
 import copy
@@ -11,13 +12,14 @@ import numpy as np
 import pandas as pd
 
 from .compare import match_sets
-from .data import Keys, read_gmt, sample_map, write_gmt
+from .data import Keys, add_qc_obs, read_gmt, sample_map, write_gmt
 from .decoy import decoy_recruitment
-from .gavish import GavishParams, NMFCache, run_gavish
+from .gavish import GavishParams, NMFCache, eligible_universe, run_gavish
 from .instability import default_perturbations, run_instability
-from .positional import arm_enrichment, assign_arms, centromeres, gene_positions_from_gtf, load_cytoband
-from .protocol import per_sample_levels, protocol_shift
-from .report import decide, write_summary
+from .positional import (arm_enrichment, assign_arms, centromeres, gene_lengths, gene_positions_from_gtf,
+                         load_cytoband)
+from .protocol import protocol_shift_kappa
+from .report import DEFAULT_RULE, RULE_VERSION, decide, rule_text, write_summary
 from .tme import tme_covariation
 from .typer import evaluate_typer, typer_features
 
@@ -30,16 +32,21 @@ DEFAULT_CONFIG = {
     "n_jobs": 1,
     "cache_dir": None,
     "min_jaccard": 0.3,
+    "qc": {"add_obs": True},      # add log_umi, log_genes, pct_mito, pct_ribo to obs if missing
     "instability": {"enabled": True, "seeds": [1, 2, 3], "n_boot": 3, "boot_fraction": 0.8,
                     "leave_one_study_out": True},
-    "decoy": {"enabled": True, "n": 3, "method": "residual", "strata": [], "n_depth_bins": 1},
-    "tme": {"enabled": True, "min_cells": 20, "n_boot": 200, "n_null": 200, "covariates": None},
+    # arms: name -> obs columns the decoys condition on; categorical columns become permutation
+    # strata, continuous ones enter the mean model. Technical and dosage arms are typed separately.
+    "decoy": {"enabled": True, "n": 5, "method": "residual", "arms": {}, "strata": [], "n_depth_bins": 1,
+              "min_kappa": 0.02, "n_null_floor": 20},
+    "tme": {"enabled": True, "min_cells": 20, "n_boot": 200, "n_null": 500, "covariates": None,
+            "spillover_adjust": True, "null_match": "expression+specificity", "n_markers": 50,
+            "min_marker_fold": 8.0},
     "positional": {"enabled": True, "cytoband": None, "gtf": None,
                    "chrom_col": "chromosome", "start_col": "start"},
-    "typer": {"enabled": True, "labels": None},   # CSV with columns mp,label (1 = artefact)
-    "protocol": {"enabled": True, "reference": None, "test": None},
-    "decision": {"recruitment": 0.3, "partial_r2": 0.3, "protocol_frac_beyond_null": 0.5,
-                 "min_mps": 3, "unstable_recovery": 0.5, "positional_q": 0.05},
+    "typer": {"enabled": True, "labels": None},   # CSV with columns mp,label (1 = curated artefact)
+    "protocol": {"enabled": True, "reference": None, "test": None, "min_pairs": 3, "n_null_sets": 100},
+    "decision": dict(DEFAULT_RULE),
     "seed": 0,
 }
 
@@ -54,6 +61,22 @@ def merge_config(user: dict | None) -> dict:
     return cfg
 
 
+def _decoy_arms(dc: dict, log) -> dict[str, tuple[str, ...]]:
+    arms = {name: tuple(cols) for name, cols in (dc.get("arms") or {}).items() if cols}
+    if not arms and dc.get("strata"):
+        log("[p1] decoy.strata given without arms: treated as one 'technical' arm; put CNA clone columns "
+            "in a separate 'dosage' arm so clone-driven recruitment is typed as dosage")
+        arms = {"technical": tuple(dc["strata"])}
+    return arms
+
+
+def _wide_decoys(per_mp: pd.DataFrame) -> pd.DataFrame:
+    """One row per MP: recruitment and kappa_retained per arm (for the typer table)."""
+    wide = per_mp.pivot(index="mp", columns="arm", values=["recruitment", "kappa_retained"])
+    wide.columns = [f"{stat}_{arm}" for stat, arm in wide.columns]
+    return wide.reset_index()
+
+
 def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", log=print) -> dict:
     cfg = merge_config(config)
     out = Path(out_dir)
@@ -61,8 +84,10 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
     keys = Keys.from_dict(cfg["keys"])
     params = GavishParams.from_dict(cfg["gavish"])
     cache = NMFCache(cfg["cache_dir"])
-    layer, rk, n_jobs = cfg["counts_layer"], cfg["recurrence_key"], int(cfg["n_jobs"])
+    layer, rk, n_jobs, seed = cfg["counts_layer"], cfg["recurrence_key"], int(cfg["n_jobs"]), int(cfg["seed"])
     tables: dict[str, pd.DataFrame] = {}
+    if cfg["qc"].get("add_obs", True):
+        add_qc_obs(adata, counts_layer=layer)
 
     reference = None
     if cfg["mps"] == "rederive" or cfg["instability"]["enabled"]:
@@ -70,6 +95,8 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
         reference = run_gavish(adata, keys, params, counts_layer=layer, cache=cache, recurrence_key=rk, n_jobs=n_jobs)
         write_gmt(reference.mp_sets(), out / "reference_mps.gmt")
         reference.programs_table().to_csv(out / "programs.csv", index=False)
+        log(f"[p1] reference: {len(reference.robust)} robust programs, {len(reference.mps)} MPs; "
+            f"{reference.n_capped_fits}/{reference.n_fits} NMF fits stopped at max_iter")
     mp_sets = reference.mp_sets() if cfg["mps"] == "rederive" else read_gmt(cfg["mps"])
     if not mp_sets:
         log("[p1] no MPs to audit")
@@ -102,51 +129,59 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
             tables["instability_per_mp"] = m.rename(columns={"ref": "mp", "alt": "rederived_mp"})[
                 ["mp", "rederived_mp", "jaccard", "recovery_all"]]
 
-    if cfg["decoy"]["enabled"] and mp_sets:
-        dc = cfg["decoy"]
+    dc = cfg["decoy"]
+    arms = _decoy_arms(dc, log)
+    if dc["enabled"] and mp_sets and arms:
         per_mp, per_decoy, _ = decoy_recruitment(
-            adata, keys, params, mp_sets, n_decoys=int(dc["n"]), strata=tuple(dc["strata"]),
-            n_depth_bins=int(dc["n_depth_bins"]), method=dc["method"], counts_layer=layer, cache=cache,
-            recurrence_key=rk, min_jaccard=cfg["min_jaccard"], seed=1000 + int(cfg["seed"]), n_jobs=n_jobs, log=log)
+            adata, keys, params, mp_sets, arms=arms, n_decoys=int(dc["n"]), n_depth_bins=int(dc["n_depth_bins"]),
+            method=dc["method"], counts_layer=layer, cache=cache, recurrence_key=rk, min_jaccard=cfg["min_jaccard"],
+            min_kappa=float(dc["min_kappa"]), n_null_floor=int(dc["n_null_floor"]), seed=1000 + seed,
+            n_jobs=n_jobs, log=log)
         tables["decoy_recruitment"] = per_mp
         tables["decoy_runs"] = per_decoy
+    elif dc["enabled"] and mp_sets:
+        log("[p1] decoys skipped: no decoy arms configured")
 
     if cfg["tme"]["enabled"] and keys.cell_type and mp_sets:
         tc = cfg["tme"]
         cov = tuple(tc["covariates"]) if tc.get("covariates") is not None else None
-        per_set, per_sample = tme_covariation(adata, keys, mp_sets, counts_layer=layer, min_cells=int(tc["min_cells"]),
-                                              covariates=cov, n_boot=int(tc["n_boot"]), n_null=int(tc["n_null"]),
-                                              seed=int(cfg["seed"]))
+        per_set, per_sample = tme_covariation(
+            adata, keys, mp_sets, counts_layer=layer, min_cells=int(tc["min_cells"]), covariates=cov,
+            spillover_adjust=bool(tc["spillover_adjust"]), null_match=tc["null_match"], n_boot=int(tc["n_boot"]),
+            n_null=int(tc["n_null"]), n_markers=int(tc["n_markers"]), min_marker_fold=float(tc["min_marker_fold"]),
+            seed=seed)
         tables["tme_covariation"] = per_set
         tables["tme_per_sample"] = per_sample
         log("[p1] TME co-variation done")
 
     pc = cfg["positional"]
+    gtf_positions = gene_positions_from_gtf(pc["gtf"]) if pc.get("gtf") else None
     if pc["enabled"] and mp_sets:
-        positions = None
-        if pc.get("gtf"):
-            positions = gene_positions_from_gtf(pc["gtf"])
-        elif pc["chrom_col"] in adata.var and pc["start_col"] in adata.var:
+        positions = gtf_positions
+        if positions is None and pc["chrom_col"] in adata.var and pc["start_col"] in adata.var:
             positions = adata.var[[pc["chrom_col"], pc["start_col"]]].rename(
                 columns={pc["chrom_col"]: "chromosome", pc["start_col"]: "start"})
         cyto = pc.get("cytoband")
         if positions is not None and cyto is not None:
             cyto_df = cyto if isinstance(cyto, pd.DataFrame) else load_cytoband(cyto)
-            arms = assign_arms(positions, centromeres(cyto_df))
-            universe = [g for g in map(str, adata.var_names)]
-            a = arm_enrichment(mp_sets, arms, universe)
-            b = arm_enrichment(mp_sets, arms, universe, exclude_known=True)
+            arms_of_gene = assign_arms(positions, centromeres(cyto_df))
+            # background: genes that could enter an MP (union of the per-sample NMF universes)
+            universe = eligible_universe(adata, keys, params, counts_layer=layer)
+            a = arm_enrichment(mp_sets, arms_of_gene, universe)
+            b = arm_enrichment(mp_sets, arms_of_gene, universe, exclude_known=True)
             a["q_excluding_known_clusters"] = b["q"].to_numpy()
             tables["positional"] = a
-            log("[p1] positional enrichment done")
+            log(f"[p1] positional enrichment done (background: {len(universe)} eligible genes)")
         else:
             log("[p1] positional axis skipped (needs gene positions and a cytoband file)")
 
     if cfg["typer"]["enabled"] and mp_sets:
-        feats = typer_features(adata, keys, mp_sets, counts_layer=layer, seed=int(cfg["seed"]))
-        for name, col in (("tme_covariation", "partial_r2"), ("decoy_recruitment", "recruitment")):
-            if name in tables:
-                feats = feats.merge(tables[name][["mp", col]], on="mp", how="left")
+        lengths = gene_lengths(gtf_positions) if gtf_positions is not None else None
+        feats = typer_features(adata, keys, mp_sets, counts_layer=layer, gene_length=lengths, seed=seed)
+        if "tme_covariation" in tables:
+            feats = feats.merge(tables["tme_covariation"][["mp", "partial_r2"]], on="mp", how="left")
+        if "decoy_recruitment" in tables:
+            feats = feats.merge(_wide_decoys(tables["decoy_recruitment"]), on="mp", how="left")
         if "positional" in tables:
             pos = tables["positional"][["mp", "q"]].copy()
             pos["neg_log10_positional_q"] = -np.log10(pos.pop("q").clip(lower=1e-300))
@@ -158,9 +193,12 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
 
     prc = cfg["protocol"]
     if prc["enabled"] and keys.protocol and prc.get("reference") and prc.get("test") and mp_sets:
-        levels = per_sample_levels(adata, keys, mp_sets, counts_layer=layer, seed=int(cfg["seed"]))
+        per_mp, per_tumour, levels = protocol_shift_kappa(
+            adata, keys, mp_sets, prc["reference"], prc["test"], counts_layer=layer,
+            min_pairs=int(prc["min_pairs"]), n_null_sets=int(prc["n_null_sets"]), seed=seed)
+        tables["protocol_shift"] = per_mp
+        tables["protocol_tumours"] = per_tumour
         tables["protocol_levels"] = levels
-        tables["protocol_shift"] = protocol_shift(levels, prc["reference"], prc["test"])
         log("[p1] protocol shift done")
 
     labels = None
@@ -177,12 +215,18 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
             versions[pkg] = metadata.version(pkg)
         except metadata.PackageNotFoundError:
             versions[pkg] = "unknown"
-    serialisable = {k: (v if not isinstance(v, pd.DataFrame) else "<DataFrame>") for k, v in cfg.items()}
-    serialisable["positional"] = {k: (v if not isinstance(v, pd.DataFrame) else "<DataFrame>")
-                                  for k, v in cfg["positional"].items()}
+
+    def plain(v):
+        if isinstance(v, pd.DataFrame):
+            return "<DataFrame>"
+        if isinstance(v, dict):
+            return {k: plain(x) for k, x in v.items()}
+        return v
+
     (out / "run_config.json").write_text(json.dumps(
-        {"config": serialisable, "params": vars(params) if hasattr(params, "__dict__") else str(params),
-         "versions": versions, "python": platform.python_version(), "decision": decision},
-        indent=2, default=str))
-    log(f"[p1] decision: {decision['verdict']} ({decision['n_flagged']} flagged MPs); see {out / 'summary.md'}")
+        {"config": plain(cfg), "params": vars(params), "rule_version": RULE_VERSION,
+         "rule": rule_text(cfg["decision"]), "versions": versions, "python": platform.python_version(),
+         "decision": decision}, indent=2, default=str))
+    log(f"[p1] decision: {decision['verdict']} ({decision['n_counted']} counted MPs; {RULE_VERSION}); "
+        f"see {out / 'summary.md'}")
     return {"decision": decision, "tables": tables, "reference": reference, "mp_sets": mp_sets}

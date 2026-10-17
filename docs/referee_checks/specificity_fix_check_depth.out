@@ -1,0 +1,18 @@
+specificity_fix_check.py: 1000 cells, 300 genes, NB size 3, fold change 2.5 in 30% of cells, |m| = |w| = 40
+reps=200 per row, n_null=200, n_boot=50, kappa_min=0.05, alpha=0.05, seed=1, size factor=depth
+latent correlation of two genes of one active program (theory): 0.355
+columns: kappa_marg = kappa(m) of raw latent expression in a 'w only' tumour (theory, no depth normalisation); A, B2, B1 = rejection rate (false membership under 'w only', power otherwise); kap_*, q95_* = mean kappa estimate and mean null q95 per arm; flr_* = share of replicates where the floor 0.05 exceeds the null q95
+setting scenario  k kappa_marg     A    B2    B1  kap_B2  q95_B2 flr_B2  kap_B1  q95_B1 flr_B1
+flat    w only    0      0.000  0.04  0.00  0.00  -0.000   0.005   1.00  -0.000   0.005   1.00
+flat    w only    2      0.000  0.07  0.00  0.00  +0.001   0.006   1.00  +0.000   0.005   1.00
+flat    w only    5      0.005  0.74  0.00  0.00  +0.004   0.011   1.00  -0.000   0.004   1.00
+flat    w only   10      0.020  1.00  0.00  0.00  +0.021   0.025   1.00  -0.000   0.003   1.00
+flat    w only   20      0.086  1.00  0.98  0.00  +0.087   0.061   0.07  -0.001  -0.001   1.00
+flat    w only   30      0.198  1.00  1.00  0.00  +0.199   0.075   0.01  -0.001  -0.004   1.00
+varied  w only    0      0.000  0.06  0.00  0.00  +0.000   0.015   1.00  -0.000   0.006   1.00
+varied  w only    2      0.000  0.10  0.00  0.00  +0.001   0.015   1.00  +0.000   0.006   1.00
+varied  w only    5      0.005  0.75  0.00  0.00  +0.005   0.016   1.00  +0.000   0.006   1.00
+varied  w only   10      0.020  1.00  0.00  0.00  +0.021   0.015   1.00  +0.001   0.005   1.00
+varied  w only   20      0.086  1.00  1.00  0.00  +0.087   0.012   1.00  +0.006   0.005   1.00
+varied  w only   30      0.198  1.00  1.00  0.01  +0.199   0.007   1.00  +0.018   0.005   1.00
+Monte Carlo SE of a rate p with 200 reps: sqrt(p(1-p)/200) (0.015 at p=0.05, 0.035 at p=0.5). Runtime 380 s with 2 workers.

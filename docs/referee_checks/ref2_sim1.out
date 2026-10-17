@@ -11,3 +11,8 @@ onoff      seed_coexp30  mom       typeI=0.033 meanZ=+0.03 sdZ=0.96 reps=300
 onoff      seed_coexp30  mom_half  typeI=0.027 meanZ=-0.28 sdZ=1.05 reps=300
 onoff      seed_coexp30  poisson   typeI=0.990 meanZ=+2.81 sdZ=0.53 reps=100
 lognormal  pca_top30     mom       typeI=0.037 meanZ=+0.20 sdZ=0.96 reps=300
+lognormal  pca_top30     mom_half  typeI=0.027 meanZ=-0.31 sdZ=1.05 reps=300
+lognormal  pca_top30     poisson   typeI=0.980 meanZ=+2.93 sdZ=0.67 reps=100
+lognormal  seed_coexp30  mom       typeI=0.053 meanZ=+0.07 sdZ=1.05 reps=300
+lognormal  seed_coexp30  mom_half  typeI=0.033 meanZ=-0.28 sdZ=1.01 reps=300
+lognormal  seed_coexp30  poisson   typeI=1.000 meanZ=+2.76 sdZ=0.48 reps=100

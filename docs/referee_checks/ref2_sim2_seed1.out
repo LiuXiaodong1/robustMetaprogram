@@ -1,0 +1,12 @@
+n=  300 shared=0/40  reject(kappa>0)=0.05  reject_after_empirical_null=0.04
+n=  300 shared=2/40  reject(kappa>0)=0.04  reject_after_empirical_null=0.04
+n=  300 shared=4/40  reject(kappa>0)=0.14  reject_after_empirical_null=0.15
+n=  300 shared=8/40  reject(kappa>0)=0.35  reject_after_empirical_null=0.35
+n= 1000 shared=0/40  reject(kappa>0)=0.11  reject_after_empirical_null=0.11
+n= 1000 shared=2/40  reject(kappa>0)=0.09  reject_after_empirical_null=0.10
+n= 1000 shared=4/40  reject(kappa>0)=0.05  reject_after_empirical_null=0.06
+n= 1000 shared=8/40  reject(kappa>0)=0.48  reject_after_empirical_null=0.53
+n= 3000 shared=0/40  reject(kappa>0)=0.08  reject_after_empirical_null=0.06
+n= 3000 shared=2/40  reject(kappa>0)=0.00  reject_after_empirical_null=0.02
+n= 3000 shared=4/40  reject(kappa>0)=0.12  reject_after_empirical_null=0.16
+n= 3000 shared=8/40  reject(kappa>0)=0.86  reject_after_empirical_null=0.86

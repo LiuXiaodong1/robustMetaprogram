@@ -9,3 +9,4 @@ n= 1000 shared=8/40  reject(kappa>0)=0.47  reject_after_empirical_null=0.52
 n= 3000 shared=0/40  reject(kappa>0)=0.04  reject_after_empirical_null=0.02
 n= 3000 shared=2/40  reject(kappa>0)=0.08  reject_after_empirical_null=0.08
 n= 3000 shared=4/40  reject(kappa>0)=0.20  reject_after_empirical_null=0.24
+n= 3000 shared=8/40  reject(kappa>0)=0.90  reject_after_empirical_null=0.90

@@ -1,5 +1,6 @@
 # Example P1 configuration for a 3CA-style cohort (adapt column names to your AnnData).
 # Run:  mpaudit p1 cohort.h5ad --config configs/p1_3ca_example.yaml --out results/p1 --n-jobs 8
+# Fill in the `decision` block (pre-declared lists) and freeze this file BEFORE running on real data.
 keys:
   sample: sample            # NMF unit (one tumour sample)
   malignant: cell_type      # column marking malignant cells...
@@ -11,11 +12,14 @@ keys:
   protocol: protocol        # e.g. fresh / fixed / nuclei; needed for the protocol axis
   clone: clone              # optional: CNA clone labels (Numbat/CopyKAT)
   doublet: doublet_score    # optional: scDblFinder score
+  intronic: intronic_fraction  # optional: per-cell intronic/unspliced fraction (STARsolo/velocyto)
 counts_layer: counts        # raw integer UMI counts (null = adata.X)
 recurrence_key: patient     # a tumour must not "recur" with its own second sample
 mps: rederive               # or a GMT of published MPs, e.g. the Gavish 2023 / 3CA v2 lists
 n_jobs: 8
 cache_dir: nmf_cache        # NMF fits are reused across perturbations and re-runs
+qc:
+  add_obs: true             # adds log_umi, log_genes, pct_mito, pct_ribo to obs if missing
 
 gavish:                     # 3CA defaults; listed here to make the audited setting explicit
   ranks: [4, 5, 6, 7, 8, 9]
@@ -27,7 +31,9 @@ gavish:                     # 3CA defaults; listed here to make the audited sett
   min_group_size: 5
   min_programs_per_mp: 5    # 3CA v2 post filters
   min_studies_per_mp: 2
+  v2_gene_order: true       # 3CA v2 orders MP genes by study-deduplicated frequency
   min_genes_per_cell: 1000  # low-complexity cell filter used across 3CA scripts
+  tol: 1.0e-7               # 1e-5 leaves top-50 lists unconverged; use 1e-8 for R parity runs
 
 instability:
   enabled: true
@@ -38,35 +44,49 @@ instability:
 
 decoy:
   enabled: true
-  n: 3
+  n: 5                      # the rule needs >= 2 hits among >= 5 decoys per arm
   method: residual
-  strata: [clone, doublet_score]   # categorical -> permutation strata; continuous -> mean model.
-                                   # Add an ambient-contamination estimate (e.g. DecontX) if available.
+  arms:                     # categorical columns -> permutation strata; continuous -> mean model
+    technical: [doublet_score, contamination, pct_ribo, intronic_fraction]  # add DecontX/SoupX estimates
+    dosage: [clone]         # CNA clone recruitment types an MP as dosage, not nuisance
   n_depth_bins: 1
 
 tme:
   enabled: true
   min_cells: 20
   n_boot: 200
-  n_null: 200              # random expression-matched gene sets for the null
+  n_null: 500               # random gene sets matched on expression and malignant specificity
   covariates: [cancer_type]
+  spillover_adjust: true    # subtract predicted malignant->TME ambient spillover
 
 positional:
   enabled: true
   cytoband: ref/cytoBand.hg38.txt.gz   # UCSC cytoBand table
-  gtf: ref/gencode.v44.basic.annotation.gtf.gz
+  gtf: ref/gencode.v44.basic.annotation.gtf.gz   # also gives gene lengths for the typer
 
 typer:
   enabled: true
-  labels: null              # CSV (mp,label) e.g. 1 for the 11 MPs removed by hand in 3CA v2
+  labels: null              # CSV (mp,label): 1 for curated artefacts, e.g. the 11 MPs removed by hand in 3CA v2
 
 protocol:
   enabled: true
   reference: fresh
   test: fixed
+  min_pairs: 3              # same-protocol replicate pairs needed for the replicate null
+  n_null_sets: 100          # otherwise random matched gene sets in the same paired tumours
 
-decision:
-  recruitment: 0.3
-  partial_r2: 0.3
-  protocol_frac_beyond_null: 0.5
+decision:                   # P1-GO v1.0; defaults shown, pre-declared lists must be filled in
+  expected_tme_shared: []   # MP names expected to co-vary with TME cells while real (e.g. IFN/MHC-II, hypoxia)
+  expected_tme_shared_gmt: null   # or gene sets; an MP overlapping one by >= min_overlap genes is excluded from (b)
+  min_overlap: 10
+  technical_arms: [technical]
+  dosage_arms: [dosage]
+  min_decoys: 5
+  min_hits: 2
+  min_kappa_retained: 0.5
+  a1_null: null_q99
+  min_a1_samples: 10
+  min_paired_tumours: 4
+  protocol_frac: 0.5
+  positional_q: 0.05
   min_mps: 3

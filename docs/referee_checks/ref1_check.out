@@ -1,0 +1,6 @@
+b_marg(moments)=1.020 vs component sizes [100.    0.5]
+component-2 fold cov: emp=0.1251 theory=0.1286 (positive => anti-conservative)
+m shares  0/40 genes with an unrelated program w: P(reject 'tumour expresses m') = 0.05
+m shares  2/40 genes with an unrelated program w: P(reject 'tumour expresses m') = 0.14
+m shares  5/40 genes with an unrelated program w: P(reject 'tumour expresses m') = 0.72
+m shares 10/40 genes with an unrelated program w: P(reject 'tumour expresses m') = 1.00

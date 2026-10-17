@@ -1,22 +1,54 @@
 """Pilot P4: the trivial artefact typer that any provenance method must beat.
 
-Cheap per-MP features (gene-name content, TME specificity, correlation of the MP score with
-QC covariates), and their ability to separate labelled artefact MPs (e.g. the 11 MPs removed
-by hand in 3CA v2) from retained MPs. Every feature is oriented so that higher = more
+Cheap per-MP features, and their ability to separate labelled artefact MPs (e.g. the 11 MPs
+removed by hand in 3CA v2) from retained MPs. Every feature is oriented so that higher = more
 artefact-like; AUROC is reported with a Hanley-McNeil standard error, per feature and for a
-leave-one-out ridge-logistic combination.
+leave-one-out ridge-logistic combination. Features (:func:`typer_features`):
+
+* gene content: fractions of the MP's genes that are ribosomal-protein, mitochondrial,
+  immediate-early/heat-shock, TME markers, or TME-specific in this cohort (``frac_*``);
+* gene length: ``median_gene_length_kb`` and ``frac_long_genes`` (genomic span > 100 kb);
+* QC co-variation: in each sample's malignant cells (>= 20), the Pearson correlation of the MP
+  score with a per-cell covariate; the feature is the median |r| over samples (``abs_cor_*``).
+  Covariates: log UMIs, log detected genes, %mito and %ribo (computed as
+  :func:`mpaudit.data.add_qc_obs` does), and, when their ``obs`` columns are given, the doublet
+  score (``keys.doublet``) and the intronic fraction (``keys.intronic``).
+
+The length and %ribo/intronic features target two technical axes that the other features miss.
+Long genes collect many intronic reads, so in single-nucleus data (and wherever pre-mRNA is
+captured) their counts rise with a cell's nuclear/intronic share; abundant short cytoplasmic
+transcripts (ribosomal proteins and similar) rise with the cytoplasmic share retained, which
+%ribo tracks. Either axis varies between cells of one sample, so per-sample NMF returns it as a
+program, and recurrence across samples makes it a metaprogram. User-reported evidence (a breast
+cancer snRNA-seq cohort; not reproduced here): two pre-registered de novo MP searches returned
+mostly technical axes, among them several "luminal" programs made of long genes (median gene
+length 317-437 kb) and a short-gene abundance axis whose score tracked %ribo in 29 of 30 patients
+(rho 0.68-0.77), labelled "EMT" by reference matching. Matching to reference programs therefore
+does not screen these axes out; the features here are a first screen, not a verdict.
+
+Caveats:
+
+* The length features are oriented for long-gene artefacts. A short-gene abundance program has a
+  LOW median length; it is caught by ``abs_cor_pct_ribo`` (and ``frac_ribo``), not by length.
+* Genomic span is not neutral: neuronal, synaptic and cell-adhesion genes are long, so some real
+  programs are long-gene rich. A length flag asks for a check against the intronic fraction.
+* For an MP containing ribosomal-protein genes, ``abs_cor_pct_ribo`` is partly mechanical (the
+  score and %ribo share those counts); ``frac_ribo`` flags such MPs directly.
+* Correlations are within sample, so a nuisance that acts only between samples is not seen, and
+  the intronic fraction must be measured per cell (e.g. STARsolo Velocyto, DropletQC).
+* Features whose input is missing are left out of the table: the length features without gene
+  lengths, ``abs_cor_doublet`` / ``abs_cor_intronic`` without the ``obs`` column.
 
 The IEG/heat-shock and TME-marker lists below are short illustrative core lists; replace them
 with curated lists (e.g. the van den Brink 2017 dissociation signature) for real analyses.
 """
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pandas as pd
 
-from .data import Keys, get_counts, log2_cpm10, malignant_mask
+from .data import MITO_PATTERN, RIBO_PATTERN, Keys, get_counts, log2_cpm10, malignant_mask, qc_metrics
+from .positional import gene_lengths
 from .scoring import score_gene_sets
 
 IEG_HSP_CORE = ["FOS", "FOSB", "JUN", "JUNB", "JUND", "EGR1", "EGR2", "EGR3", "ATF3", "IER2", "IER3",
@@ -25,8 +57,8 @@ IEG_HSP_CORE = ["FOS", "FOSB", "JUN", "JUNB", "JUND", "EGR1", "EGR2", "EGR3", "A
 TME_MARKERS_CORE = ["PTPRC", "CD3D", "CD3E", "CD2", "NKG7", "GZMA", "CD79A", "MS4A1", "LYZ", "CD68",
                     "CD14", "C1QA", "C1QB", "TYROBP", "FCER1G", "AIF1", "PECAM1", "VWF", "CDH5",
                     "CLDN5", "COL1A1", "COL1A2", "COL3A1", "DCN", "LUM", "HBB", "HBA1", "HBA2"]
-_RIBO = re.compile(r"^RP[SL]\d")
-_MITO = re.compile(r"^MT-")
+LONG_GENE_BP = 100_000
+MIN_CELLS_COR = 20
 
 
 def typer_features(
@@ -35,14 +67,20 @@ def typer_features(
     gene_sets: dict[str, list[str]],
     *,
     counts_layer: str | None = None,
+    gene_length: pd.Series | None = None,
     tme_fold: float = 4.0,
     seed: int = 0,
 ) -> pd.DataFrame:
+    """One row per gene set with the features described in the module docstring.
+
+    ``gene_length`` is in bp, indexed by gene name (e.g. :func:`mpaudit.positional.gene_lengths` of
+    a GTF table); by default it is taken from ``adata.var`` when that has ``gene_length`` or
+    ``start``/``end`` columns. Length features use the set's genes with a known length (NaN if none).
+    """
     counts = get_counts(adata, counts_layer)
     L = log2_cpm10(counts)
     mal = malignant_mask(adata, keys)
     genes = np.asarray(adata.var_names.astype(str))
-    pos = {g: i for i, g in enumerate(genes)}
 
     tme_specific = set()
     if (~mal).sum() >= 10:
@@ -50,36 +88,47 @@ def typer_features(
         t_mean = np.asarray(L[~mal].mean(axis=0)).ravel()
         tme_specific = set(genes[(t_mean - m_mean) >= np.log2(tme_fold)])
 
-    totals = np.asarray(counts.sum(axis=1)).ravel()
-    detected = np.asarray((counts > 0).sum(axis=1)).ravel()
-    mito_idx = [pos[g] for g in genes if _MITO.match(g)]
-    pct_mito = (np.asarray(counts[:, mito_idx].sum(axis=1)).ravel() / np.maximum(totals, 1)) if mito_idx else np.zeros_like(totals)
-    qc = {"log_umi": np.log1p(totals), "log_genes": np.log1p(detected), "pct_mito": pct_mito}
-    if keys.doublet and keys.doublet in adata.obs:
-        qc["doublet"] = pd.to_numeric(adata.obs[keys.doublet], errors="coerce").to_numpy()
+    if gene_length is None:
+        try:
+            gene_length = gene_lengths(adata.var)
+        except ValueError:
+            pass
+    if gene_length is not None:
+        gene_length = pd.Series(pd.to_numeric(gene_length, errors="coerce").to_numpy(dtype=float),
+                                index=gene_length.index.astype(str))
+        gene_length = gene_length[~gene_length.index.duplicated()]
+
+    qc = {c: v.to_numpy() for c, v in qc_metrics(counts, genes).items()}
+    for name, col in (("doublet", keys.doublet), ("intronic", keys.intronic)):
+        if col and col in adata.obs:
+            qc[name] = pd.to_numeric(adata.obs[col], errors="coerce").to_numpy()
 
     scores = score_gene_sets(L, genes, gene_sets, np.flatnonzero(mal), seed=seed)
     sample = adata.obs[keys.sample].astype(str).to_numpy()
+    groups = [mal & (sample == s) for s in pd.unique(sample[mal])]
 
     rows = []
     for name, gs in gene_sets.items():
         n = max(len(gs), 1)
         rec = {
             "mp": name,
-            "frac_ribo": sum(bool(_RIBO.match(g)) for g in gs) / n,
-            "frac_mito": sum(bool(_MITO.match(g)) for g in gs) / n,
+            "frac_ribo": sum(bool(RIBO_PATTERN.match(g)) for g in gs) / n,
+            "frac_mito": sum(bool(MITO_PATTERN.match(g)) for g in gs) / n,
             "frac_ieg_hsp": len(set(gs) & set(IEG_HSP_CORE)) / n,
             "frac_tme_marker": len(set(gs) & set(TME_MARKERS_CORE)) / n,
             "frac_tme_specific": len(set(gs) & tme_specific) / n,
         }
+        if gene_length is not None:
+            bp = gene_length.reindex(list(dict.fromkeys(gs))).dropna().to_numpy()
+            rec["median_gene_length_kb"] = float(np.median(bp)) / 1e3 if bp.size else np.nan
+            rec["frac_long_genes"] = float(np.mean(bp > LONG_GENE_BP)) if bp.size else np.nan
         sc = scores[name].to_numpy()
         for q, v in qc.items():
             cors = []
-            for s in pd.unique(sample[mal]):
-                r = mal & (sample == s)
+            for r in groups:
                 a, b = sc[r], v[r]
                 ok = np.isfinite(a) & np.isfinite(b)
-                if ok.sum() >= 20 and np.std(a[ok]) > 0 and np.std(b[ok]) > 0:
+                if ok.sum() >= MIN_CELLS_COR and np.std(a[ok]) > 0 and np.std(b[ok]) > 0:
                     cors.append(np.corrcoef(a[ok], b[ok])[0, 1])
             rec[f"abs_cor_{q}"] = float(np.median(np.abs(cors))) if cors else np.nan
         rows.append(rec)

@@ -7,6 +7,11 @@ are reported separately (``KNOWN_CLUSTERS``) and enrichment is also computed wit
 
 Gene positions come from ``adata.var`` columns or a GTF (:func:`gene_positions_from_gtf`); arms
 come from a UCSC ``cytoBand.txt`` (centromere = ``acen`` bands; :func:`load_cytoband`).
+
+The same sources give gene lengths (:func:`gene_lengths`) for the typer's gene-length features.
+Length here is the genomic span of the GTF ``gene`` record (first to last base of any transcript,
+introns included), which is what governs how many intronic reads a gene collects in
+single-nucleus data; it is not the mature transcript length.
 """
 from __future__ import annotations
 
@@ -47,7 +52,11 @@ def centromeres(cyto: pd.DataFrame) -> dict[str, float]:
 
 
 def gene_positions_from_gtf(path: str | Path, name_attr: str = "gene_name") -> pd.DataFrame:
-    """Gene name, chromosome and start from the ``gene`` records of a GTF (optionally gzipped)."""
+    """Chromosome, start, end and length per gene from the ``gene`` records of a GTF (optionally gzipped).
+
+    Indexed by ``name_attr``. Coordinates are GTF's (1-based, closed), so ``length = end - start + 1``
+    bp. A name with several ``gene`` records (e.g. PAR genes on X and Y) keeps the first.
+    """
     pat = re.compile(rf'{name_attr} "([^"]+)"')
     rows = []
     opener = gzip.open if str(path).endswith(".gz") else open
@@ -60,8 +69,29 @@ def gene_positions_from_gtf(path: str | Path, name_attr: str = "gene_name") -> p
                 continue
             m = pat.search(f[8])
             if m:
-                rows.append((m.group(1), _norm_chrom(f[0]), int(f[3])))
-    return pd.DataFrame(rows, columns=["gene", "chromosome", "start"]).drop_duplicates("gene").set_index("gene")
+                rows.append((m.group(1), _norm_chrom(f[0]), int(f[3]), int(f[4])))
+    df = pd.DataFrame(rows, columns=["gene", "chromosome", "start", "end"]).drop_duplicates("gene").set_index("gene")
+    df["length"] = df["end"] - df["start"] + 1
+    return df
+
+
+def gene_lengths(table: pd.DataFrame, start_col: str = "start", end_col: str = "end") -> pd.Series:
+    """Gene length in bp (genomic span), indexed like ``table`` (``adata.var`` or a positions table).
+
+    Taken from a ``gene_length`` column, else ``length`` (as from :func:`gene_positions_from_gtf`),
+    else ``end - start + 1`` (1-based closed coordinates, as in GTF and Ensembl BioMart; the 1 bp
+    convention difference is immaterial at gene scale). Missing or non-positive values are NaN.
+    Raises ``ValueError`` when none of these columns exists.
+    """
+    for col in ("gene_length", "length"):
+        if col in table:
+            bp = pd.to_numeric(table[col], errors="coerce")
+            break
+    else:
+        if start_col not in table or end_col not in table:
+            raise ValueError(f"no gene_length, length or {start_col}/{end_col} columns to take gene lengths from")
+        bp = pd.to_numeric(table[end_col], errors="coerce") - pd.to_numeric(table[start_col], errors="coerce") + 1
+    return bp.where(bp > 0).astype(float).rename("gene_length")
 
 
 def assign_arms(positions: pd.DataFrame, cen: dict[str, float],

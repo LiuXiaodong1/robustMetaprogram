@@ -61,21 +61,30 @@ def test_run_p1_end_to_end(small, tmp_path):
         "keys": KEYS, "counts_layer": "counts", "recurrence_key": "tumour",
         "gavish": {"ranks": [3, 4], "nrun": 1, "max_iter": 200, "min_genes_per_cell": 0},
         "instability": {"seeds": [1], "n_boot": 1},
-        "decoy": {"n": 1, "strata": ["clone"]},
-        "tme": {"n_boot": 20},
+        "decoy": {"n": 1, "arms": {"technical": ["doublet_est", "contamination_est"], "dosage": ["clone_est"]}},
+        "tme": {"n_boot": 20, "n_null": 40},
         "positional": {"cytoband": truth["cytoband"]},
-        "protocol": {"reference": "fresh", "test": "fixed"},
+        "protocol": {"reference": "fresh", "test": "fixed", "n_null_sets": 20},
+        "decision": {"expected_tme_shared_sets": {"IFN": truth["sets"]["IFN"]}},
     }
     out = run_p1(adata, cfg, tmp_path, log=lambda *a: None)
-    assert out["decision"]["verdict"] in {"GO", "PIVOT", "INCOMPLETE"}
-    for f in ["summary.md", "mp_flags.csv", "run_config.json", "typer_features.csv"]:
+    d = out["decision"]
+    assert d["rule_version"] == "P1-GO v1.0"
+    assert d["verdict"] in {"GO", "PIVOT", "INCOMPLETE"}
+    assert not d["powered"]["technical_decoys"]  # one decoy per arm is below the rule's minimum of 5
+    for f in ["summary.md", "mp_flags.csv", "run_config.json", "typer_features.csv", "decoy_recruitment.csv",
+              "protocol_shift.csv", "tme_covariation.csv"]:
         assert (tmp_path / f).exists()
+    assert set(out["tables"]["decoy_recruitment"]["arm"]) == {"technical", "dosage"}
 
 
 def test_residual_decoy_keeps_covariate_driven_coexpression(small):
+    # estimated covariates, as an analyst would have them; the planted doublet_score is coupled to
+    # cycling by design (see test_decoy_arms.py for that false-recruitment check)
     adata, truth = small
     keys = Keys(**KEYS)
-    dec = make_decoy(adata, keys, counts_layer="counts", strata=("clone", "doublet_score", "contamination"), seed=4)
+    dec = make_decoy(adata, keys, counts_layer="counts", strata=("clone_est", "doublet_est", "contamination_est"),
+                     seed=4)
     X, D = get_counts(adata, "counts"), get_counts(dec, "counts")
     pos = {g: i for i, g in enumerate(adata.var_names)}
 

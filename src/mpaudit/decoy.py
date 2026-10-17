@@ -3,17 +3,66 @@
 A decoy keeps, per sample and per gene, the count distribution conditional on declared nuisance
 (sequencing depth, categorical strata such as CNA clone, and continuous covariates such as a
 doublet score or an ambient-contamination estimate) and destroys all other gene-gene
-co-expression. Running the unmodified MP pipeline on decoys shows which MPs nuisance alone can
-reproduce.
+co-expression. Running the MP pipeline unchanged on decoys shows which MPs nuisance alone can
+reproduce. (The pipeline is the Python port in :mod:`mpaudit.gavish`, not the 3CA R code.)
 
 Two methods:
 
 * ``"residual"`` (default): stratified conditional residual permutation (SCRP). Per gene a
   negative-binomial model with mean ``s_c * exp(a_{g,stratum} + b_g' z_c)`` (``s_c`` = size
-  factor, ``z_c`` = standardised continuous covariates; Poisson IRLS fit) gives randomised-quantile
-  residuals; residuals are permuted within categorical strata and mapped back through each
-  receiving cell's own distribution, so depth and covariate effects are kept cell by cell.
+  factor, ``z_c`` = standardised continuous covariates) gives randomised-quantile residuals;
+  residuals are permuted within categorical strata and mapped back through each receiving cell's
+  own distribution, so depth and covariate effects are kept cell by cell. The mean is a Poisson
+  fit (Newton steps, halved per gene when they lower the objective) with a small ridge on the
+  slopes ``b_g`` only: the stratum intercepts are free, so the fitted means of each stratum sum to
+  its observed counts for every gene and low-count genes are not pulled up.
 * ``"permute"``: raw counts permuted within strata (continuous columns are binned).
+
+**Decoy arms.** Nuisance is declared in arms, each a set of obs columns conditioned on together;
+each arm runs ``n_decoys`` decoys (decoy ``d`` of every arm uses seed ``seed + d``, so arms differ
+only in what they condition on). Per real MP and arm, ``hits`` counts the decoys containing an MP
+with Jaccard >= ``min_jaccard`` to it and ``recruitment = hits / n_decoys``; one match among three
+decoys is not evidence (the P1 rule in :mod:`mpaudit.report` asks for >= 2 hits among >= 5
+decoys). Reporting per arm types the recruitment: an arm of inferred CNA clones recruiting an MP
+marks it **dosage** (genetic, not technical nuisance); an arm of technical covariates (doublet
+score, ambient-contamination estimate, %ribo, intronic fraction) marks it **nuisance**.
+
+**kappa_retained.** A decoy reproduces an MP to the extent that the declared nuisance explains
+the MP's co-expression. Per MP, arm, decoy and malignant sample with >= ``min_cells`` cells, the
+ratio ``kappa_decoy / kappa_real`` of the MP's mean latent correlation
+(:func:`mpaudit.coexpr.kappa`, size factors = total counts; genes detected in >= 5% of the
+sample's cells in the real data, at least 5) is taken; ``kappa_retained`` is its median over the
+samples where the MP is co-expressed, averaged over the arm's decoys (NaN when no sample
+qualifies: a sample where the MP is not co-expressed says nothing about what nuisance explains).
+"Co-expressed" means ``kappa_real`` above both ``min_kappa`` [0.02] and the 95th percentile of
+``n_null_floor`` [20] random gene sets matched on mean expression and detection in that sample
+(:func:`mpaudit.coexpr.matched_random_sets`); with a fixed floor alone, samples where the MP is
+inactive (kappa_real at the random-set level, 0.04-0.10 on the toy) would put noise ratios into the
+median. It is not clipped: noise moves single ratios below 0 or above 1, and see below for
+systematic ratios above 1.
+
+**Caveat: covariates computed from expression.** Doublet scores, contamination estimates and
+inferred clones are computed from the same counts. A decoy conditioned on one keeps whatever
+co-expression the covariate predicts, including that of a *real* program correlated with it:
+cycling cells are larger and get higher doublet scores, so a doublet arm keeps part of the cycle
+program, and with enough cells NMF can find that part in decoys. Recruitment alone would then call
+real biology nuisance; ``kappa_retained`` grades how much of the co-expression the covariate
+explains. On the toy cohort (:func:`mpaudit.sim.simulate_cohort`, seed 0, one decoy per arm,
+median over 16 samples) an arm on the planted doublet score (cycling cells score 0.3 higher;
+within-sample Spearman 0.61 with cycling) keeps 0.37 of the cycle program's kappa, an arm on the
+expression-based ``doublet_est`` (Spearman 0.27) about 0.01; ``clone_est`` keeps 0.84-0.88 of the
+CNA set's kappa and ``contamination_est`` 1.27-1.32 of the contamination set's. Two limits remain:
+
+* a real program strongly tied to a covariate's estimator (cell size and the doublet score, a
+  transcriptional state that an expression-based clone caller splits on) keeps most of its kappa
+  and cannot be told from nuisance here; only covariates measured independently of expression
+  (genotype demultiplexing, cell hashing, protocol twins) settle such cases;
+* a covariate computed from the MP's own genes inflates ``kappa_retained`` above 1: the covariate
+  carries those genes' sampling noise as a shared factor, which the decoy turns into
+  co-expression. ``contamination_est`` is the share of counts on TME-specific genes, over half of
+  which form the contamination set (19 of 35 on a seed-3 toy cohort); recomputed without those
+  genes it keeps 0.90 instead of 1.25 there. Estimate covariates from genes outside the audited MP
+  where possible.
 
 Strata leak a little real signal: per-stratum gene means carry the stratum's share of every
 program, so decoy co-expression grows roughly with (number of strata / cells per sample). Depth
@@ -30,9 +79,14 @@ import pandas as pd
 import scipy.sparse as sp
 from scipy import stats
 
+from .coexpr import kappa, matched_random_sets
 from .compare import jaccard_matrix
 from .data import Keys, get_counts, malignant_mask, sample_map
 from .gavish import GavishParams, NMFCache, assemble, compute_programs
+
+PER_MP_COLUMNS = ["mp", "arm", "n_decoys", "hits", "recruitment", "mean_best_jaccard", "max_best_jaccard",
+                  "kappa_retained"]
+PER_DECOY_COLUMNS = ["arm", "decoy", "n_robust", "n_mps"]
 
 
 def _is_continuous(v: pd.Series) -> bool:
@@ -90,26 +144,54 @@ def _nb_dispersion(Y: np.ndarray, mu: np.ndarray) -> np.ndarray:
     return np.clip(theta, 1e-2, np.inf)
 
 
-def _glm_mean(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, Z: np.ndarray,
-              n_iter: int = 8, ridge: float = 1e-3) -> np.ndarray:
-    """Per-gene Poisson log-linear fit ``mu = s * exp(a_stratum + Z b)`` by IRLS, vectorised over genes."""
+def _glm_mean(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, Z: np.ndarray, n_iter: int = 30,
+              ridge: float = 1e-3, tol: float = 1e-10, max_halvings: int = 20) -> np.ndarray:
+    """Per-gene Poisson log-linear fit ``mu = s * exp(a_stratum + Z b)``, vectorised over genes.
+
+    Maximises ``sum(Y log mu - mu) - ridge * n * |b|^2 / 2`` per gene: only the covariate slopes
+    are penalised, so at the optimum the fitted means of each stratum sum to its observed counts
+    (the intercept score equation). Newton steps (IRLS for the canonical link) are halved, per
+    gene, until they do not lower the objective; plain IRLS overshoots on genes driven by a few
+    high-leverage cells (e.g. doublets at the far end of a contamination covariate) and can return
+    means orders of magnitude above the data. Stops when no gene's objective rises by more than
+    ``tol`` (relative), or after ``n_iter`` steps.
+    """
     levels, codes = np.unique(strata, return_inverse=True)
     X = np.hstack([np.eye(levels.size)[codes], Z])
     n, p = X.shape
     logs = np.log(s)[:, None]
+    pen = np.r_[np.zeros(levels.size), np.full(Z.shape[1], ridge * n)]
+
+    def objective(B, cols=slice(None)):
+        eta = np.clip(X @ B + logs, -30, 30)
+        return (Y[:, cols] * eta - np.exp(eta)).sum(axis=0) - 0.5 * (pen[:, None] * B**2).sum(axis=0), eta
+
     B = np.zeros((p, Y.shape[1]))
     for h in range(levels.size):
         rows = codes == h
         B[h] = np.log(np.maximum(Y[rows].sum(axis=0), 0.5) / max(s[rows].sum(), 1e-12))
-    pen = ridge * n * np.eye(p)
+    obj, eta = objective(B)
     for _ in range(n_iter):
-        eta = np.clip(X @ B + logs, -30, 30)
         mu = np.exp(eta)
-        z = eta - logs + (Y - mu) / np.maximum(mu, 1e-12)
-        A = np.einsum("np,ng,nq->gpq", X, mu, X, optimize=True) + pen
-        b = np.einsum("np,ng->gp", X, mu * z, optimize=True)
-        B = np.linalg.solve(A, b[..., None])[..., 0].T
-    return np.exp(np.clip(X @ B + logs, -30, 30))
+        grad = X.T @ (Y - mu) - pen[:, None] * B
+        H = np.einsum("np,ng,nq->gpq", X, mu, X, optimize=True) + np.diag(pen)
+        step = np.linalg.solve(H, grad.T[..., None])[..., 0].T
+        new_B, new_obj, new_eta = B.copy(), obj.copy(), eta.copy()
+        todo, t = np.arange(Y.shape[1]), 1.0
+        for _ in range(max_halvings):
+            cand = B[:, todo] + t * step[:, todo]
+            o, e = objective(cand, todo)
+            ok = o >= obj[todo] - 1e-12 * np.abs(obj[todo])  # rounding near the optimum
+            acc = todo[ok]
+            new_B[:, acc], new_obj[acc], new_eta[:, acc] = cand[:, ok], o[ok], e[:, ok]
+            todo, t = todo[~ok], t / 2
+            if not todo.size:
+                break
+        gain = new_obj - obj
+        B, obj, eta = new_B, new_obj, new_eta
+        if np.all(gain <= tol * (1.0 + np.abs(obj))):
+            break
+    return np.exp(eta)
 
 
 def _scrp_block(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, rng: np.random.Generator,
@@ -128,14 +210,19 @@ def _scrp_block(Y: np.ndarray, s: np.ndarray, strata: np.ndarray, rng: np.random
     th = np.where(pois, 1.0, theta)[None, :]
     prob = th / (th + mu)
 
+    def apply(x, poisson_fn, nbinom_fn):  # each gene through its own family only (scipy's are slow)
+        out = np.empty(x.shape)
+        out[:, pois] = poisson_fn(x[:, pois], mu[:, pois])
+        out[:, ~pois] = nbinom_fn(x[:, ~pois], th[:, ~pois], prob[:, ~pois])
+        return out
+
     def cdf(x):
-        out = np.where(pois[None, :], stats.poisson.cdf(x, mu), stats.nbinom.cdf(x, th, prob))
-        return np.where(x < 0, 0.0, out)
+        return np.where(x < 0, 0.0, apply(x, stats.poisson.cdf, stats.nbinom.cdf))
 
     lo, hi = cdf(Y - 1), cdf(Y)
     U = lo + rng.random(Y.shape) * (hi - lo)
     U = np.clip(_permute_within(U, strata, rng), 0.0, 1.0 - 1e-12)
-    out = np.where(pois[None, :], stats.poisson.ppf(U, mu), stats.nbinom.ppf(U, th, prob))
+    out = apply(U, stats.poisson.ppf, stats.nbinom.ppf)
     out = np.nan_to_num(out, nan=0.0, posinf=0.0)
     return np.maximum(out, 0.0)
 
@@ -205,48 +292,176 @@ def make_decoy(
     return out
 
 
+# --------------------------------------------------------------------------- kappa_retained
+
+def _reference_kappa(adata, keys: Keys, gene_sets: dict[str, list[str]], counts_layer: str | None,
+                     min_cells: int, min_detect: float, min_genes: int, min_kappa: float = 0.02,
+                     n_null_floor: int = 20, seed: int = 0) -> list[tuple[np.ndarray, dict]]:
+    """Per malignant sample with >= ``min_cells`` cells (of nonzero total):
+    ``(rows, {set: (genes, kappa_real, floor)})``.
+
+    A set's genes are those detected in >= ``min_detect`` of the sample's cells in the real data;
+    samples where fewer than ``min_genes`` qualify are left out for that set. ``floor`` is the
+    larger of ``min_kappa`` and the 95th percentile of ``kappa`` over ``n_null_floor`` random gene
+    sets matched on mean expression and detection (0 disables the null). The decoy is scored on
+    the same cells and genes.
+    """
+    rng = np.random.default_rng(seed)
+    X = get_counts(adata, counts_layer)
+    mal = malignant_mask(adata, keys)
+    samples = adata.obs[keys.sample].astype(str).to_numpy()
+    pos = {g: i for i, g in enumerate(adata.var_names.astype(str))}
+    idx = {m: np.array(sorted({pos[g] for g in genes if g in pos}), dtype=int) for m, genes in gene_sets.items()}
+    refs = []
+    for s in pd.unique(samples[mal]):
+        rows = np.flatnonzero(mal & (samples == s))
+        totals = np.asarray(X[rows].sum(axis=1)).ravel()
+        rows, totals = rows[totals > 0], totals[totals > 0]
+        if rows.size < min_cells:
+            continue
+        Xs = X[rows]
+        detect = np.asarray((Xs > 0).mean(axis=0)).ravel()
+        mean_expr = np.asarray(Xs.sum(axis=0)).ravel() / totals.sum()
+        eligible = detect >= min_detect
+        per_set = {}
+        for m, g in idx.items():
+            g = g[eligible[g]]
+            if g.size < min_genes:
+                continue
+            k_real = kappa(Xs[:, g].toarray(), totals)
+            floor = min_kappa
+            if n_null_floor > 0 and np.isfinite(k_real) and k_real >= min_kappa:
+                nulls = [kappa(Xs[:, r].toarray(), totals) for r in
+                         matched_random_sets(g, mean_expr, detect, n_null_floor, rng, candidates=eligible)]
+                nulls = np.array([v for v in nulls if np.isfinite(v)])
+                if nulls.size:
+                    floor = max(floor, float(np.quantile(nulls, 0.95)))
+            per_set[m] = (g, k_real, floor)
+        refs.append((rows, per_set))
+    return refs
+
+
+def _retained_ratios(refs: list[tuple[np.ndarray, dict]], decoy_counts: sp.csr_matrix,
+                     min_kappa: float) -> dict[str, list[float]]:
+    """Per set: ``kappa_decoy / kappa_real`` over the samples where ``kappa_real`` exceeds its floor."""
+    out: dict[str, list[float]] = {}
+    for rows, per_set in refs:
+        D = decoy_counts[rows]
+        totals = np.asarray(D.sum(axis=1)).ravel()
+        for m, (g, k_real, floor) in per_set.items():
+            if np.isfinite(k_real) and k_real >= max(min_kappa, floor):
+                ratio = kappa(D[:, g].toarray(), totals) / k_real
+                if np.isfinite(ratio):
+                    out.setdefault(m, []).append(ratio)
+    return out
+
+
+def kappa_retained(
+    adata,
+    decoy,
+    keys: Keys,
+    gene_sets: dict[str, list[str]],
+    *,
+    counts_layer: str | None = None,
+    min_cells: int = 20,
+    min_kappa: float = 0.02,
+    min_detect: float = 0.05,
+    min_genes: int = 5,
+    n_null_floor: int = 20,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Share of each gene set's co-expression one decoy keeps (no NMF; see the module docstring).
+
+    ``decoy`` is :func:`make_decoy` output for ``adata``. Columns: ``mp`` (set name),
+    ``kappa_retained`` (median over samples of ``kappa_decoy / kappa_real``; NaN when no sample's
+    ``kappa_real`` exceeds its floor) and ``n_samples`` (samples entering the median).
+    """
+    refs = _reference_kappa(adata, keys, gene_sets, counts_layer, min_cells, min_detect, min_genes,
+                            min_kappa, n_null_floor, seed)
+    ratios = _retained_ratios(refs, get_counts(decoy, counts_layer), min_kappa)
+    return pd.DataFrame([{"mp": m, "kappa_retained": float(np.median(ratios[m])) if m in ratios else np.nan,
+                          "n_samples": len(ratios.get(m, []))} for m in gene_sets])
+
+
+# --------------------------------------------------------------------------- recruitment
+
 def decoy_recruitment(
     adata,
     keys: Keys,
     params: GavishParams,
     real_mps: dict[str, list[str]],
     *,
-    n_decoys: int = 3,
+    arms: dict[str, tuple[str, ...]] | None = None,
     strata: tuple[str, ...] = (),
+    n_decoys: int = 5,
     n_depth_bins: int = 1,
     method: str = "residual",
     counts_layer: str | None = None,
     cache: NMFCache | None = None,
     recurrence_key: str | None = None,
     min_jaccard: float = 0.3,
+    min_cells: int = 20,
+    min_kappa: float = 0.02,
+    n_null_floor: int = 20,
     seed: int = 1000,
     n_jobs: int = 1,
     log=print,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, dict[str, list[str]]]]:
-    """Run the unmodified pipeline on ``n_decoys`` decoy cohorts.
+    """Run the MP pipeline on ``n_decoys`` decoy cohorts per arm.
 
-    Returns ``(per_mp, per_decoy, decoy_mps)``. ``per_mp.recruitment`` is the fraction of decoy
-    cohorts containing an MP with Jaccard >= ``min_jaccard`` to the real MP.
+    ``arms`` maps an arm name to the obs columns its decoys condition on (e.g. ``{"technical":
+    ("doublet_est", "contamination_est"), "dosage": ("clone_est",)}``); ``strata`` alone defines
+    one arm named ``"all"``. An arm's columns are used sorted and de-duplicated, and the NMF cache
+    tag of a decoy names them with the method, ``n_depth_bins`` and the seed, so arms with the same
+    columns share fits.
+
+    Returns ``(per_mp, per_decoy, decoy_mps)``:
+
+    * ``per_mp``, one row per (MP, arm): ``mp``, ``arm``, ``n_decoys``, ``hits`` (decoys with an MP
+      at Jaccard >= ``min_jaccard`` to the real MP), ``recruitment`` (``hits / n_decoys``),
+      ``mean_best_jaccard``, ``max_best_jaccard`` (best match per decoy, over decoys) and
+      ``kappa_retained`` (``min_cells``, ``min_kappa``, ``n_null_floor``: see the module docstring);
+    * ``per_decoy``: ``arm``, ``decoy`` (cache tag), ``n_robust``, ``n_mps``;
+    * ``decoy_mps``: cache tag -> the decoy cohort's MPs.
     """
+    if arms is None:
+        arms = {"all": tuple(strata)}
+    elif strata:
+        raise ValueError("pass either arms or strata, not both")
+    if not arms:
+        raise ValueError("arms is empty")
+    if n_decoys < 1:
+        raise ValueError("n_decoys must be >= 1")
     cache = cache or NMFCache()
     unit = sample_map(adata, keys, recurrence_key) if recurrence_key else None
     study = sample_map(adata, keys, keys.study) if keys.study else None
-    best = {m: [] for m in real_mps}
-    per_decoy, decoy_mps = [], {}
-    for d in range(n_decoys):
-        tag = f"decoy-{method}-{'+'.join(strata)}-d{n_depth_bins}-s{seed + d}"
-        dec = make_decoy(adata, keys, counts_layer=counts_layer, strata=strata, n_depth_bins=n_depth_bins,
-                         method=method, seed=seed + d)
-        spg = compute_programs(dec, keys, params, counts_layer=counts_layer, cache=cache, data_tag=tag, n_jobs=n_jobs)
-        res = assemble(spg, params, unit_of_sample=unit, study_of_sample=study)
-        sets = res.mp_sets()
-        decoy_mps[tag] = sets
-        per_decoy.append({"decoy": tag, "n_robust": len(res.robust), "n_mps": len(sets)})
-        J = jaccard_matrix(real_mps, sets) if sets else np.zeros((len(real_mps), 0))
-        for i, m in enumerate(real_mps):
-            best[m].append(float(J[i].max()) if J.shape[1] else 0.0)
-        log(f"[decoy] {tag}: {len(res.robust)} robust programs, {len(sets)} decoy MPs")
-    rows = [{"mp": m, "recruitment": float(np.mean(np.array(v) >= min_jaccard)) if v else np.nan,
-             "mean_best_jaccard": float(np.mean(v)) if v else np.nan,
-             "max_best_jaccard": float(np.max(v)) if v else np.nan} for m, v in best.items()]
-    return pd.DataFrame(rows), pd.DataFrame(per_decoy), decoy_mps
+    refs = _reference_kappa(adata, keys, real_mps, counts_layer, min_cells, min_detect=0.05, min_genes=5,
+                            min_kappa=min_kappa, n_null_floor=n_null_floor, seed=seed)
+    rows, per_decoy, decoy_mps = [], [], {}
+    for arm, arm_cols in arms.items():
+        cols = tuple(sorted(set(arm_cols)))
+        best = {m: [] for m in real_mps}
+        retained = {m: [] for m in real_mps}
+        for d in range(n_decoys):
+            tag = f"decoy-{method}-{'+'.join(cols)}-d{n_depth_bins}-s{seed + d}"
+            dec = make_decoy(adata, keys, counts_layer=counts_layer, strata=cols, n_depth_bins=n_depth_bins,
+                             method=method, seed=seed + d)
+            for m, ratios in _retained_ratios(refs, get_counts(dec, counts_layer), min_kappa).items():
+                retained[m].append(float(np.median(ratios)))
+            spg = compute_programs(dec, keys, params, counts_layer=counts_layer, cache=cache, data_tag=tag,
+                                   n_jobs=n_jobs)
+            res = assemble(spg, params, unit_of_sample=unit, study_of_sample=study)
+            sets = res.mp_sets()
+            decoy_mps[tag] = sets
+            per_decoy.append({"arm": arm, "decoy": tag, "n_robust": len(res.robust), "n_mps": len(sets)})
+            J = jaccard_matrix(real_mps, sets) if sets else np.zeros((len(real_mps), 0))
+            for i, m in enumerate(real_mps):
+                best[m].append(float(J[i].max()) if J.shape[1] else 0.0)
+            log(f"[decoy] {arm}: {tag}: {len(res.robust)} robust programs, {len(sets)} decoy MPs")
+        for m in real_mps:
+            b = np.array(best[m])
+            hits = int((b >= min_jaccard).sum())
+            rows.append({"mp": m, "arm": arm, "n_decoys": n_decoys, "hits": hits, "recruitment": hits / n_decoys,
+                         "mean_best_jaccard": float(b.mean()), "max_best_jaccard": float(b.max()),
+                         "kappa_retained": float(np.mean(retained[m])) if retained[m] else np.nan})
+    return pd.DataFrame(rows, columns=PER_MP_COLUMNS), pd.DataFrame(per_decoy, columns=PER_DECOY_COLUMNS), decoy_mps

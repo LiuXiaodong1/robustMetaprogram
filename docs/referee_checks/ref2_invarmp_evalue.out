@@ -2,3 +2,19 @@ H0 delta=0                   spec_pois  mean logE=  -8716.1  sd=  278.4  P(E>=20
 H0 delta=0                   spec_nb    mean logE=  -2654.1  sd=   93.1  P(E>=20)=0.00  P(E>=160)=0.00
 H0 delta=0                   plug_pois  mean logE=   -133.3  sd=   77.4  P(E>=20)=0.00  P(E>=160)=0.00
 H0 delta=0                   plug_nb    mean logE=    -77.1  sd=   37.9  P(E>=20)=0.00  P(E>=160)=0.00
+H1 delta=log1.65 x20g        spec_pois  mean logE=  -5808.3  sd=  452.2  P(E>=20)=0.00  P(E>=160)=0.00
+H1 delta=log1.65 x20g        spec_nb    mean logE=  -1736.7  sd=  115.3  P(E>=20)=0.00  P(E>=160)=0.00
+H1 delta=log1.65 x20g        plug_pois  mean logE=  +3841.0  sd=  227.9  P(E>=20)=1.00  P(E>=160)=1.00
+H1 delta=log1.65 x20g        plug_nb    mean logE=   +906.1  sd=   65.0  P(E>=20)=1.00  P(E>=160)=1.00
+H1 delta=log2.72 x20g        spec_pois  mean logE=  +9177.5  sd= 1482.1  P(E>=20)=1.00  P(E>=160)=1.00
+H1 delta=log2.72 x20g        spec_nb    mean logE=  +1589.3  sd=  195.4  P(E>=20)=1.00  P(E>=160)=1.00
+H1 delta=log2.72 x20g        plug_pois  mean logE= +21004.8  sd= 1234.5  P(E>=20)=1.00  P(E>=160)=1.00
+H1 delta=log2.72 x20g        plug_nb    mean logE=  +4356.7  sd=  183.0  P(E>=20)=1.00  P(E>=160)=1.00
+H0 delta=0, kappa sd=0.1     spec_pois  mean logE=  -7961.1  sd=  371.3  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0, kappa sd=0.1     spec_nb    mean logE=  -2413.4  sd=   84.1  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0, kappa sd=0.1     plug_pois  mean logE=   +886.5  sd=  217.9  P(E>=20)=1.00  P(E>=160)=1.00
+H0 delta=0, kappa sd=0.1     plug_nb    mean logE=   +332.5  sd=  115.3  P(E>=20)=1.00  P(E>=160)=1.00
+H0 delta=0, kappa sd=0.2     spec_pois  mean logE=  -5562.8  sd=  558.6  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0, kappa sd=0.2     spec_nb    mean logE=  -1487.7  sd=  156.9  P(E>=20)=0.00  P(E>=160)=0.00
+H0 delta=0, kappa sd=0.2     plug_pois  mean logE=  +3943.8  sd=  650.4  P(E>=20)=1.00  P(E>=160)=1.00
+H0 delta=0, kappa sd=0.2     plug_nb    mean logE=  +1484.3  sd=  172.2  P(E>=20)=1.00  P(E>=160)=1.00

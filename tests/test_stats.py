@@ -65,7 +65,7 @@ def test_protocol_loss_is_one_sided():
     for t, d in zip("EF", [1.0, -1.0]):  # same-protocol replicate pairs -> null |delta| = 1
         rows += [{"tumour": t, "protocol": "fresh", "mp": "m", "intensity": 0.0, "prevalence": 0.0},
                  {"tumour": t, "protocol": "fresh", "mp": "m", "intensity": d, "prevalence": 0.0}]
-    res = protocol_shift(pd.DataFrame(rows), "fresh", "fixed").iloc[0]
+    res = protocol_shift(pd.DataFrame(rows), "fresh", "fixed", min_pairs=2).iloc[0]
     assert res["frac_loss_beyond_null_intensity"] == 0.25
     assert res["frac_gain_beyond_null_intensity"] == 0.25
 
