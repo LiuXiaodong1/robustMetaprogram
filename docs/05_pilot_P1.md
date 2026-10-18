@@ -434,10 +434,40 @@ counted was stopped by the guard, by a dosage label, or by both), how many count
 (`counted_by_criterion`), the technical arm, the rule label with the deviations, and the code commit with a flag for
 uncommitted changes.
 
-RESULTS: to be filled from results/demo*/truth_summary.json after the rerun on the final code.
+**Results at v1.3** (commit 038eb70, 2026-10-18; seed 0, 5 decoys per arm; `results/demo*/truth_summary.json`
+and `truth_comparison.csv`; every run is labelled `P1-GO v1.3 (unregistered variant: typer.labels=None)`). These
+are toy results, true by construction, from one seed.
 
-*Preview, not v1.3 output:* the planted-cohort demo at commit edb2736 (rule v1.2) gave GO, with the 4 planted
-technical MPs counted and 0 of the 4 planted biology MPs. It is superseded by the rerun above.
+| Run | Verdict | Counted MPs (criterion) | Planted biology counted | Biology MPs the technical decoys recruit |
+|---|---|---|---|---|
+| planted (`results/demo`) | GO | 4: abundance, long genes, contamination (a); stress (b and c) | 0 of 4 | none |
+| `--clean` (`results/demo_clean`) | PIVOT | 0 | 0 of 4 | cycle: 5 of 5 decoys, `kappa_retained` 0.358 |
+| `--true-doublet` (`results/demo_true_doublet`) | GO | the same 4 as the planted run | 0 of 4 | cycle: 5 of 5 decoys, `kappa_retained` 0.481 |
+
+The planted run re-derives 8 MPs, each best matched to one planted program:
+- **abundance** (Jaccard 0.57), **long genes** (0.70) and **contamination** (0.30): recruited by the technical arm
+  in 5 of 5 decoys, `kappa_retained` 0.85, 0.89 and 1.11, so criterion (a).
+- **stress** (0.80): partial R² 0.98 against a matched-null q99 of 0.88, still above its null with every ρ̂ × 1.5,
+  so criterion (b); κ lost in 4 of 4 paired tumours, so criterion (c). No decoy recruits it (`kappa_retained`
+  0.19).
+- **cycle, hypoxia, EMT** (biology): no decoy hit, `kappa_retained` −0.07 to −0.02, partial R² 0.007–0.17 against
+  q99 0.69–0.75, and no κ loss in any paired tumour.
+- **IFN** (TME-shared biology, 0.73): partial R² 0.88 against q99 0.68, holding at ρ̂ × 1.5. It would count through
+  criterion (b); only its pre-declared expected-TME-shared gene set keeps it out. The same happens in the `--clean`
+  run (0.84 against 0.73).
+- No CNA MP forms (the CNA is robust in only 4 of the 16 samples), so no MP is typed dosage.
+- Instability (informational): `recovery_all` 0.76–1.0.
+
+What the three runs show:
+- The rule can fail and can pass: GO on the cohort with planted nuisance, PIVOT on the null cohort, with the same
+  settings.
+- No planted biology program was counted in any run. But in the `--clean` run, and with the planted doublet score,
+  the technical decoys recruit the real cycle program in every decoy, and only the `kappa_retained` ≥ 0.5 guard
+  stops it from counting: margins 0.14 and 0.019. Under a covariate tightly tied to a real program the guard is the
+  only defence, and it sits at its edge (Caveats, decoys).
+- The expected-TME-shared exclusion does real work: without it IFN would count through (b) in both cohorts.
+- The planted cohort reaches GO only because the recalibrated technical axes form MPs; at their first magnitudes
+  they formed none (above).
 
 Leave-one-study-out on the toy is a small-cohort stress test, not a stability estimate. The toy has 10 tumours in
 3 studies (16 samples), so leaving out a study drops 3–4 tumours, and EMT, IFN and the CNA are planted in only 5, 6
@@ -491,12 +521,10 @@ not evidence about the stability of 3CA MPs (more than 1,000 tumours in dozens o
   genes pushes `kappa_retained` above 1, and the excess ratio inflates this more than v1.2's ratio did: on the
   default toy (seed 0) a `contamination_est` arm keeps 1.97 of the contamination set's excess, a `doublet_est` arm
   1.75 and the technical arm 1.39. Covariates measured independently of expression (genotype demultiplexing,
-  hashing, protocol twins) settle such cases. Preview on code before v1.3 (to be replaced by the rerun): in the
-  `--clean` toy run the technical arm recruited the real cycle program in 5 of 5 decoys, and only its
-  `kappa_retained` of 0.35 under v1.2's plain ratio (< 0.5) kept it from counting. Under v1.3's excess ratio the
-  same arm keeps 0.35 of cycle on that cohort at seed 0 (0.348 and 0.347 for decoys 1000 and 1001), so at the
-  demo's seed the margin to the 0.5 guard stays about 0.15; at seeds 1 and 2 it keeps 0.07 and 0.08
-  (`scripts/calibration`, two decoys).
+  hashing, protocol twins) settle such cases. In the v1.3 demos (commit 038eb70, seed 0, 5 decoys) the technical
+  arm recruited the real cycle program in 5 of 5 decoys in the `--clean` run and with the planted doublet score,
+  and only its `kappa_retained` (0.358 and 0.481, < 0.5) kept it from counting (Demo). With two decoys at seeds 1
+  and 2 the `--clean` value is 0.07 and 0.08 (`scripts/calibration`), so the 0.36 at seed 0 is the high end.
 - **Entry to `kappa_retained`.** A sample enters only if the MP's excess over its matched random sets exceeds 3 SD
   of theirs, so weakly co-expressed MPs lose samples. On the default toy (seed 0) the contamination set enters in 7
   of 16 samples (its excess is 1.7–3.7 SD; 6–15 samples over seeds 0–2), and an MP with no entering sample has an
