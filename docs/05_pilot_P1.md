@@ -377,7 +377,8 @@ Three runs of P1 with 3CA defaults (`nrun` 10; no minimum of detected genes, as 
 - `python scripts/demo_sim.py --clean --out results/demo_clean`: the null cohort, with no planted nuisance
   programs, technical axes or CNA, but spillover, doublet–cycle coupling and capture bias kept. The frozen rule
   should not say GO there.
-- Optional, `--true-doublet`: the technical arm uses the planted `doublet_score` (cycling cells score 0.3 higher)
+- `python scripts/demo_sim.py --true-doublet --out results/demo_true_doublet` (optional): the technical arm uses
+  the planted `doublet_score` (cycling cells score 0.3 higher)
   instead of `doublet_est`, to push a real program tightly coupled to a covariate through NMF recruitment and the
   `kappa_retained` ≥ 0.5 guard. On the default cohort the estimated doublet–cycle coupling is weak: `doublet_est`
   has a within-sample Spearman correlation of 0.26 with cycling (planted `doublet_score`: 0.61), a `doublet_est`
@@ -385,15 +386,16 @@ Three runs of P1 with 3CA defaults (`nrun` 10; no minimum of detected genes, as 
   technical arm keeps 0.497 of it at seed 0 (0.504 and 0.491 for decoys 1000 and 1001), just below the 0.5 guard,
   and 0.53 at seeds 1 and 2 (`scripts/calibration/reference/a_v1.3.json`). So a `biology_counted` of 0 in the
   default run does not test the guard under strong coupling; `--true-doublet` puts cycle at the guard. Its
-  two-decoy value at seed 0 is 0.003 below it, and the demo averages 5 decoys, so whether cycle counts there
-  depends on those decoys and on recruitment. On the null cohort, which has no TME ambient RNA,
+  two-decoy value at seed 0 is 0.003 below it; in the demo (5 decoys) the technical arm recruits cycle in 5 of 5
+  decoys and keeps 0.481, so cycle does not count, by 0.019 (Results at v1.3, below). On the null cohort, which has no TME ambient RNA,
   `contamination_est` and `doublet_est` track cycling (Spearman 0.48 and 0.51), and a `doublet_est` arm keeps 0.26
   of cycle's excess κ (see Caveats); the coupling there runs through the TME-specific genes behind
   `contamination_est`, from which `doublet_est` is built. Arm contents are registered as filled in but not compared
   by the code, so all three runs carry the same rule label; the `--true-doublet` arm is not one a registration would
   fix (the planted score cannot be observed in real data).
 
-These are toy results at v1.3, re-run on 2026-10-18: `simulate_cohort(seed=0)` (the null cohort with
+The Spearman and `kappa_retained` values in the `--true-doublet` item are toy results at v1.3 from two decoys (not
+the 5-decoy demo runs, whose results follow below), re-run on 2026-10-18: `simulate_cohort(seed=0)` (the null cohort with
 `dissociation_stress`, `tme_contamination`, `cna` and `technical_axes` off), Spearman correlations within each
 sample's malignant cells (median over samples), decoys `make_decoy(..., seed=1000 + d)` for d = 0, 1 and
 `kappa_retained(..., seed=1000)`, averaged over the two decoys, as `decoy_recruitment` does with config seed 0.
@@ -435,8 +437,8 @@ counted was stopped by the guard, by a dosage label, or by both), how many count
 uncommitted changes.
 
 **Results at v1.3** (commit 038eb70, 2026-10-18; seed 0, 5 decoys per arm; `results/demo*/truth_summary.json`
-and `truth_comparison.csv`; every run is labelled `P1-GO v1.3 (unregistered variant: typer.labels=None)`). These
-are toy results, true by construction, from one seed.
+and `truth_comparison.csv`; `results/` is not committed, so regenerate them with the commands above; every run is
+the unregistered variant above). These are toy results, true by construction, from one seed.
 
 | Run | Verdict | Counted MPs (criterion) | Planted biology counted | Biology MPs the technical decoys recruit |
 |---|---|---|---|---|
@@ -451,23 +453,29 @@ The planted run re-derives 8 MPs, each best matched to one planted program:
   so criterion (b); κ lost in 4 of 4 paired tumours, so criterion (c). No decoy recruits it (`kappa_retained`
   0.19).
 - **cycle, hypoxia, EMT** (biology): no decoy hit, `kappa_retained` −0.07 to −0.02, partial R² 0.007–0.17 against
-  q99 0.69–0.75, and no κ loss in any paired tumour.
+  q99 0.69–0.75, and no κ loss that meets (c) in any of the 4 paired tumours (`frac_loss_beyond_null_kappa` 0; the
+  closest is cycle in T04, Δlog κ −0.400 against the 1.5-fold margin of −0.405, and one tumour of four would not
+  meet (c) anyway).
 - **IFN** (TME-shared biology, 0.73): partial R² 0.88 against q99 0.68, holding at ρ̂ × 1.5. It would count through
   criterion (b); only its pre-declared expected-TME-shared gene set keeps it out. The same happens in the `--clean`
   run (0.84 against 0.73).
-- No CNA MP forms (the CNA is robust in only 4 of the 16 samples), so no MP is typed dosage.
+- No CNA MP forms: only 4 of the 16 samples have a robust program with ≥ 10 CNA_7q genes (`programs.csv`), fewer
+  than a founder needs (> 5 partners). No MP is typed dosage (no dosage-decoy hit; positional q ≥ 0.096).
 - Instability (informational): `recovery_all` 0.76–1.0.
 
 What the three runs show:
 - The rule can fail and can pass: GO on the cohort with planted nuisance, PIVOT on the null cohort, with the same
-  settings.
-- No planted biology program was counted in any run. But in the `--clean` run, and with the planted doublet score,
-  the technical decoys recruit the real cycle program in every decoy, and only the `kappa_retained` ≥ 0.5 guard
-  stops it from counting: margins 0.14 and 0.019. Under a covariate tightly tied to a real program the guard is the
-  only defence, and it sits at its edge (Caveats, decoys).
+  rule settings (instability, informational only, is off in the `--clean` run).
+- No planted biology program was counted in any run. But in the `--clean` run (null cohort, `doublet_est`) and the
+  `--true-doublet` run (default cohort, planted `doublet_score`) the technical decoys recruit the real cycle program
+  in every decoy. Once the technical decoys recruit a real program, the `kappa_retained` ≥ 0.5 guard is the rule's
+  only defence (curated and dosage labels do not apply to it). Here, with covariates coupled to cycling at Spearman
+  0.51 and 0.61, it held by 0.14 and 0.019. With tighter coupling (the planted score on the null cohort: two-decoy
+  calibration 0.64–0.66) it would not hold (Caveats, Covariates computed from expression).
 - The expected-TME-shared exclusion does real work: without it IFN would count through (b) in both cohorts.
-- The planted cohort reaches GO only because the recalibrated technical axes form MPs; at their first magnitudes
-  they formed none (above).
+- Two of the four counted MPs are the recalibrated technical axes (abundance, long genes); without them 2 MPs would
+  count, below the 3 that GO needs. At their first magnitudes these axes formed no MP (above); no v1.3 run was made
+  at those magnitudes.
 
 Leave-one-study-out on the toy is a small-cohort stress test, not a stability estimate. The toy has 10 tumours in
 3 studies (16 samples), so leaving out a study drops 3–4 tumours, and EMT, IFN and the CNA are planted in only 5, 6
@@ -516,15 +524,17 @@ not evidence about the stability of 3CA MPs (more than 1,000 tumours in dozens o
   covariate's estimator cannot be told from nuisance here: if the decoys recruit it and keep ≥ 0.5, it counts as
   nuisance support under (a). In the calibration harness, under the technical arm with the planted doublet score,
   cycle keeps 0.497, 0.532 and 0.530 on the default toy at seeds 0, 1 and 2 (at the 0.5 guard: just below it at
-  seed 0, above it at seeds 1 and 2) and 0.64–0.67 on the null toy (above it). Only
-  recruitment can then block it, and recruitment was not evaluated there. A covariate computed from an MP's own
+  seed 0, above it at seeds 1 and 2) and 0.64–0.66 on the null toy (above it). Only
+  recruitment can then block it, and recruitment was not evaluated there; in the v1.3 demos (commit 038eb70, seed
+  0, 5 decoys) recruitment did not block it: the technical arm recruited cycle in 5 of 5 decoys in the `--clean` run
+  (null cohort, `doublet_est`) and in the `--true-doublet` run (default cohort, planted `doublet_score`), and only
+  `kappa_retained` 0.358 and 0.481 (< 0.5) kept it from counting (Demo). With two decoys the `--clean` value is
+  0.35 at seed 0 and 0.07 and 0.08 at seeds 1 and 2 (`scripts/calibration/reference/a_v1.3.json`), so seed 0 is
+  the high end of the three. A covariate computed from an MP's own
   genes pushes `kappa_retained` above 1, and the excess ratio inflates this more than v1.2's ratio did: on the
   default toy (seed 0) a `contamination_est` arm keeps 1.97 of the contamination set's excess, a `doublet_est` arm
   1.75 and the technical arm 1.39. Covariates measured independently of expression (genotype demultiplexing,
-  hashing, protocol twins) settle such cases. In the v1.3 demos (commit 038eb70, seed 0, 5 decoys) the technical
-  arm recruited the real cycle program in 5 of 5 decoys in the `--clean` run and with the planted doublet score,
-  and only its `kappa_retained` (0.358 and 0.481, < 0.5) kept it from counting (Demo). With two decoys at seeds 1
-  and 2 the `--clean` value is 0.07 and 0.08 (`scripts/calibration`), so the 0.36 at seed 0 is the high end.
+  hashing, protocol twins) settle such cases.
 - **Entry to `kappa_retained`.** A sample enters only if the MP's excess over its matched random sets exceeds 3 SD
   of theirs, so weakly co-expressed MPs lose samples. On the default toy (seed 0) the contamination set enters in 7
   of 16 samples (its excess is 1.7–3.7 SD; 6–15 samples over seeds 0–2), and an MP with no entering sample has an

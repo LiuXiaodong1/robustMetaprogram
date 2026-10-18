@@ -33,8 +33,9 @@ pip install -e ".[test]"
 pytest                                                          # unit and end-to-end tests on toy cohorts (about 7 min)
 python scripts/demo_sim.py --out results/demo --n-jobs 4        # toy cohort with known truth
 python scripts/demo_sim.py --clean --out results/demo_clean     # null cohort: the rule should not say GO
-python scripts/demo_sim.py --true-doublet --out results/demo_td # technical arm on the planted doublet score
-# v1.3 toy results (seed 0): planted GO (4 technical MPs, 0 of 4 biology), --clean PIVOT; docs/05_pilot_P1.md, Demo
+python scripts/demo_sim.py --true-doublet --out results/demo_true_doublet  # technical arm on the planted doublet score
+# v1.3 toy results (seed 0): planted GO (4 technical MPs, 0 of 4 biology), --clean PIVOT, --true-doublet GO
+# (cycle kept out only by kappa_retained 0.481); docs/05_pilot_P1.md, Demo
 mpaudit p1 cohort.h5ad --config my_config.yaml --out results/p1 --n-jobs 8  # a filled-in copy of the template below
 ```
 

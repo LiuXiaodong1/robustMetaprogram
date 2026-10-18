@@ -91,15 +91,17 @@ the CNA set's excess. On the null cohort of the same seed (no TME ambient RNA, s
 Spearman 0.51 with cycling and its arm keeps 0.26 of cycle's excess (re-run 2026-10-18). Back on
 the default cohort, an arm on ``pct_ribo`` keeps 0.87 of the abundance set's excess, 0.06 of the
 long genes' and between -0.07 and 0.04 of cycle, hypoxia, EMT, IFN and CNA; the four-covariate
-technical arm of the demo keeps 0.88 of abundance, 0.92 of long genes and 1.39 of contamination,
-and between -0.04 and 0.07 of those five biology sets. Two limits remain:
+technical arm (the registered arm, which the demo also uses) keeps, with these two decoys on the
+planted sets, 0.88 of abundance, 0.92 of long genes and 1.39 of contamination, and between -0.04
+and 0.07 of those five biology sets (the v1.3 demo itself, 5 decoys on re-derived MPs, gives 0.85,
+0.89 and 1.11, and -0.07 to -0.01 for cycle, hypoxia, EMT and IFN). Two limits remain:
 
 * a real program strongly tied to a covariate's estimator (cell size and the doublet score, a
   transcriptional state that an expression-based clone caller splits on, translation and %ribo)
   keeps most of its co-expression and cannot be told from nuisance here; if the decoys recruit it,
   it counts as nuisance support under criterion (a) (in ``scripts/calibration``, under the technical
   arm with the planted doublet score in place of ``doublet_est``, cycle keeps 0.497, 0.532 and 0.530
-  on the default toy at seeds 0, 1 and 2, at the 0.5 guard, and 0.64-0.67 on the null toy, above
+  on the default toy at seeds 0, 1 and 2, at the 0.5 guard, and 0.64-0.66 on the null toy, above
   it). Only covariates measured independently of
   expression (genotype demultiplexing, cell hashing, protocol twins) settle such cases;
 * a covariate computed from the MP's own genes inflates ``kappa_retained`` above 1: the covariate
