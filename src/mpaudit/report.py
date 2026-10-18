@@ -1,4 +1,4 @@
-"""P1 GO/NO-GO decision (frozen rule ``P1-GO v1.2``) and the markdown summary.
+"""P1 GO/NO-GO decision (frozen rule ``P1-GO v1.3``) and the markdown summary.
 
 The rule is frozen before any real cohort is audited; ``docs/02_TESSERA_proposal.md`` and
 ``docs/05_pilot_P1.md`` state the same rule. Versions (none was registered or run on real data):
@@ -12,6 +12,26 @@ The rule is frozen before any real cohort is audited; ``docs/02_TESSERA_proposal
   and the registered settings outside the ``decision`` block are enforced
   (:data:`REGISTERED_SETTINGS`, :func:`rule_deviations`), as are the inputs without which the
   dosage and curated-artefact exclusions do not run (:func:`mpaudit.pipeline.config_deviations`).
+* v1.3 (2026-10-18): v1.2 with criteria (c) and (a) recalibrated after a design comparison found
+  that v1.2's activity gate selected tumours on the noisy kappa it then tested (toy null: 0.13-0.17
+  of the tested (set, tumour) pairs without the program called losses, up to 0.31 of the tested
+  tumours on exchangeable synthetic laws (0.05-0.31 across them), and an unplanted random set met
+  (c)) and that
+  ``kappa_retained`` admitted samples where the MP is absent (a minority biology MP reached 0.66).
+  (c): no activity gate (every paired tumour with a defined change, null bound and self bound is
+  tested; ``protocol.kappa_active`` is informational and no longer registered); the replicate bound
+  is the lower of the linear-scale t bound carried to the MP's kappa and the log-scale t bound; the
+  random-set bound is the ``floor(0.05 (n + 1))``-th order statistic, its sets drawn per tumour and
+  MP; a loss must also beat 1.645 x the bootstrap SE of the MP's own change (self bound); every
+  sample of a tumour is scored on the same number of cells, at the same depth (binomial thinning to
+  the tumour's lowest median count per cell), with the panel taken on those counts; no draw depends
+  on the other MPs or on the cohort's cell order. (a): ``kappa_retained`` is the share of the MP's
+  co-expression in excess of 50 matched random gene sets (``decoy.n_null_floor`` 50) that the decoys
+  keep, over the samples whose excess is above 3 SD of the sets. Every random draw differs from
+  v1.2, so no v1.2 output carries over.
+
+v1.3 is the version to register. Its calibration on the toy and on synthetic laws (toy results only,
+not real data) is in ``scripts/calibration/README.md``.
 
 It is built so that it can fail:
 
@@ -43,7 +63,14 @@ It is built so that it can fail:
 
   (a) a technical decoy arm recruits the MP (a decoy MP at Jaccard >= ``min_jaccard``, 0.3) in
       >= ``min_hits`` of its decoys (``decoy.n``, registered at exactly 5; >= ``min_decoys`` are
-      needed) and the decoys keep >= ``min_kappa_retained`` of its co-expression;
+      needed) and ``kappa_retained`` >= ``min_kappa_retained``: the share of the MP's co-expression in
+      excess of matched random gene sets that the decoys keep (:func:`mpaudit.decoy.kappa_retained`:
+      per malignant sample of >= 20 cells, on the MP's genes detected in >= 5% of them (at least 5),
+      ``(kappa_decoy - bg_decoy) / (kappa_real - bg_real)``, ``bg`` the median
+      kappa of ``decoy.n_null_floor`` (50) random gene sets matched on mean expression and detection;
+      the median over the samples where ``kappa_real - bg_real > max(decoy.min_kappa, 3 SD of the
+      sets' kappa)`` (``decoy.min_kappa`` 0.02), averaged over the arm's decoys; NaN, so no hit, when
+      no sample qualifies);
   (b) TME co-variation (:mod:`mpaudit.tme`), all of: the statistic is spillover-adjusted
       (``spill_adjusted`` True; with too few malignant-specific markers ``tme_covariation`` falls
       back to the unadjusted statistic, which cannot count); ``slope > 0``; ``partial_r2`` above
@@ -53,50 +80,69 @@ It is built so that it can fail:
       ``tme.rho_sensitivity`` 1.5 it exists wherever the adjusted ``partial_r2`` is finite), the
       association also holds with every ``rho_hat`` scaled up: ``slope_rho > 0`` and ``partial_r2_rho`` above
       the same quantile of its own null (``null_q99_rho``). No fixed R^2 threshold;
-  (c) protocol (:mod:`mpaudit.protocol`): >= ``min_paired_tumours`` paired tumours where the MP is
-      active and a one-sided co-expression (kappa) loss in >= ``protocol_frac`` of them
-      (``frac_loss_beyond_null_kappa``). A tumour's loss is called by ``mpaudit.protocol``: Δlog κ
-      below the null bound and below ``-kappa_min_effect`` (log 1.5). The null bound is a
-      one-sided 95% t prediction bound from same-protocol replicate pairs of >= ``min_pairs`` (3)
-      distinct tumours, else matched random gene sets carried to the MP's κ level on the linear
-      scale. Activity gate: a paired tumour is tested only if the MP's κ under the reference or
-      under the test protocol (mean over the tumour's samples under it) is above
-      ``max(kappa_active, q95)``, with ``kappa_active`` 0.05 and q95 the 95th percentile of the
-      matched random sets' κ in the same samples; a replicate pair enters the null only if the MP
-      is active in at least one of its pieces. The same condition for both keeps paired and
-      replicate changes exchangeable, which the replicate null needs.
+  (c) protocol (:mod:`mpaudit.protocol`): >= ``min_paired_tumours`` tested paired tumours and a
+      one-sided co-expression (kappa) loss in >= ``protocol_frac`` of them
+      (``frac_loss_beyond_null_kappa``). Every paired tumour with a defined Δlog κ, null bound and
+      self bound is tested; there is no activity gate (the activity columns are informational).
+      κ is that of the MP's panel genes (detected in >= 5% of the tumour's κ cells under each
+      protocol; undefined below 5 genes or a panel retention of 0.5), in samples of >= 20 malignant
+      cells. Every sample of a tumour is scored on the same number of cells (the tumour's smallest
+      sample, at most 2000), their counts binomially thinned to the tumour's lowest median count per
+      cell. A tumour's loss is called by ``mpaudit.protocol``: Δlog κ below the null bound, below the
+      self bound and below ``-kappa_min_effect`` (log 1.5). The null bound is, with same-protocol
+      replicate pairs (κ finite in both pieces) from >= ``min_pairs`` (3) distinct tumours, the
+      lower of two one-sided 95% t prediction bounds, on the linear κ changes (carried to the MP's κ
+      level) and on the log κ changes; otherwise the k-th smallest linear κ change, ``k =
+      floor(0.05 (n + 1))``, of the n >= 20 matched random gene sets of the tumour with a defined
+      change (``protocol.n_null_sets`` 100 drawn per tumour and MP), carried to the MP's κ level; a
+      tumour whose k-th smallest change is not below its k-th largest is not tested. The self bound
+      is -1.645 x the bootstrap SE of the MP's own linear κ change (50 resamples of each sample's κ
+      cells, drawn per seed, sample and MP), carried to its κ level; a tumour with an undefined SE
+      is not tested.
 
 * **Verdict.** GO if >= ``min_mps`` retained, non-dosage MPs have nuisance support; INCOMPLETE
   if no criterion is adequately powered; otherwise PIVOT. Powered: (a) some technical arm has
   >= ``min_decoys`` decoys; (b) some MP has >= ``min_a1_samples`` samples, a finite ``a1_null``
-  and ``spill_adjusted`` True; (c) some MP has >= ``min_paired_tumours`` paired tumours in which
-  it is active and its κ change and null bound are defined (``n_paired_tumours`` of
-  :mod:`mpaudit.protocol`; a metadata count of paired tumours is only an upper bound on it).
+  and ``spill_adjusted`` True; (c) some MP has >= ``min_paired_tumours`` tested paired tumours (its
+  κ change, null bound and self bound defined: ``n_paired_tumours`` of :mod:`mpaudit.protocol`; a
+  metadata count of paired tumours is only an upper bound on it).
 
 **Informational only**: instability, positional flags outside the dosage rule, the within-sample
-kappa ratio (``kappa_ratio_median``; not spillover-adjusted), A4 intensity and prevalence, and the
-trivial typer.
+kappa ratio (``kappa_ratio_median``; not spillover-adjusted), the kappa activity columns of
+:mod:`mpaudit.protocol`, A4 intensity and prevalence, and the trivial typer.
 
 **Registered settings.** The rule reads the ``decision`` block and settings outside it. The code
 compares two groups with their registered values: the thresholds of the ``decision`` block
 (``DEFAULT_RULE``; not the arm names or the pre-declared lists, which the user fills in, and not
 ``unstable_recovery``, which is informational) and :data:`REGISTERED_SETTINGS`, each of which must
-equal its registered value (a larger null size would also re-draw the random sets, a second chance
-to pass). :func:`mpaudit.pipeline.config_deviations` adds the inputs the exclusions need (curated
-labels with their gene sets under ``mps: rederive``, a dosage decoy arm, a cytoband and gene
-positions). :func:`rule_deviations` lists every difference of the first two groups;
+equal its registered value (a null size is not an "at least" setting: another size moves the
+estimated null quantile or background, so choosing it would give a second chance to pass).
+:func:`mpaudit.pipeline.config_deviations` adds the inputs the exclusions need (curated labels with
+their gene sets under ``mps: rederive``, a dosage decoy arm, a cytoband and gene positions, which
+:func:`mpaudit.pipeline.run_p1` also checks place genes on chromosome arms).
+:func:`rule_deviations` lists every difference of the first two groups;
 :func:`mpaudit.pipeline.validate_config` refuses a config with any deviation unless its top-level
 ``unregistered_variant`` is true, and then the verdict is labelled
-``P1-GO v1.2 (unregistered variant: ...)`` (:func:`rule_label`) in ``decision``, ``rule_text``,
+``P1-GO v1.3 (unregistered variant: ...)`` (:func:`rule_label`) in ``decision``, ``rule_text``,
 ``run_config.json`` and ``summary.md``. :func:`decide` finds the deviations of the ``decision``
 block it is given and takes the others from its ``deviations`` argument; :func:`rule_text` also
 compares the settings passed to it. The label does not cover what the code does not compare: the
 contents of the decoy arms, the pre-declared lists, the label and gene-set files, the ``gavish``
-(NMF) block, ``tme.covariates``, ``tme.n_boot``, the keys, ``recurrence_key``, the protocol names
-and whether the TME and protocol axes are switched on (off, a criterion is unpowered, which can turn
-PIVOT into INCOMPLETE). These are registered as filled in, in the frozen config file, and a run is
+(NMF) block other than ``gavish.seed``, ``counts_layer``, ``tme.covariates``, ``tme.n_boot``, the
+keys, ``positional.chrom_col``/``start_col``, ``recurrence_key``, the protocol names and whether the
+TME and protocol axes are switched on (off, a criterion is unpowered, which can turn PIVOT into
+INCOMPLETE; :func:`mpaudit.pipeline.run_p1` logs a skipped axis and ``summary.md`` notes it), and
+every other config key. These are registered as filled in, in the frozen config file, and a run is
 checked against that file through ``run_config.json`` (the normalised config) and the input-file
 digests; a registered label alone does not prove that the registered file was used.
+Constants of the rule that are fixed in code, not settings (:data:`FIXED_CONSTANTS`: the κ floor
+0.01, the self bound's 50 bootstrap resamples and z 1.645, the level and the minimum of 20 sets of
+the random-set bound, the cell cap 2000 and the panel of (c) (samples of >= 20 cells, genes detected
+in >= 5%, >= 5 genes and a retention >= 0.5), the 3-SD entry and the minimum of 20 random sets of
+``kappa_retained`` and its gene set (samples of >= 20 cells, genes detected in >= 5%, >= 5 genes)),
+are stated in :func:`rule_text` and pinned by the tests, which also check that the functions
+applying them take them as defaults. ``protocol.kappa_active`` only sets informational columns
+and is not part of the rule.
 
 :func:`validate_rule` checks a ``decision`` block (unknown or pre-v1.0 keys, types, the GMT path)
 and :func:`decide` calls it, as does :func:`mpaudit.pipeline.run_p1` before anything runs.
@@ -110,9 +156,14 @@ import numpy as np
 import pandas as pd
 
 from .data import read_gmt
-from .protocol import KAPPA_ACTIVE, KAPPA_MIN_EFFECT, MIN_PAIRS
+from .decoy import EXCESS_ENTRY_SD, MIN_FLOOR_SETS, N_NULL_FLOOR
+from .decoy import MIN_CELLS as DECOY_MIN_CELLS
+from .decoy import MIN_DETECT as DECOY_MIN_DETECT
+from .decoy import MIN_GENES as DECOY_MIN_GENES
+from .protocol import (KAPPA_BOOT, KAPPA_FLOOR, KAPPA_MIN_EFFECT, KAPPA_SELF_Z, MAX_KAPPA_CELLS, MIN_CELLS, MIN_DETECT,
+                       MIN_GENES, MIN_IOTA, MIN_PAIRS, MIN_RANDOM_SETS, NULL_ALPHA)
 
-RULE_VERSION = "P1-GO v1.2"
+RULE_VERSION = "P1-GO v1.3"
 RHO_SENSITIVITY = 1.5  # registered rho_hat factor of the sensitivity re-run (tme.rho_sensitivity)
 MIN_JACCARD = 0.3  # registered MP match threshold (top-level min_jaccard): decoy hits, label carry-over
 
@@ -139,17 +190,21 @@ DEFAULT_RULE = {
 REGISTERED_DECISION_KEYS = ("min_decoys", "min_hits", "min_kappa_retained", "a1_null", "min_a1_samples",
                             "min_paired_tumours", "protocol_frac", "positional_q", "min_overlap", "min_mps")
 # Settings outside the decision block that the rule or its axes' rule statistics read: (config path,
-# registered value). Any other value deviates. Larger null sizes are not "at least" settings: they
-# also re-draw the random sets (as another seed does), so they would give a second chance to pass.
+# registered value). Any other value deviates. Larger null sizes are not "at least" settings: another
+# size moves the estimated null quantile or background (tme.n_null, decoy.n_null_floor and
+# protocol.n_null_sets add or drop sets, drawn from a stream per gene set, per (sample, set) or per
+# (tumour, MP)), so choosing it would give a second chance to pass.
 REGISTERED_SETTINGS = (
     ("min_jaccard", MIN_JACCARD),                # (a) decoy hits; curated labels of re-derived MPs
-    ("seed", 0),                                 # decoys, random-gene-set nulls, cell subsamples
+    ("seed", 0),                                 # decoys, random-gene-set nulls, cell subsamples and thinning,
+                                                 # bootstrap resamples
+    ("gavish.seed", 0),                          # NMF restarts of the reference run and of every decoy fit
     ("decoy.enabled", True),                     # off: no (a) and no dosage-arm exclusion
     ("decoy.n", 5),                              # (a) is >= min_hits of these: more decoys, cheaper hits
     ("decoy.method", "residual"),
     ("decoy.n_depth_bins", 1),                   # depth strata leak real co-expression into decoys
-    ("decoy.min_kappa", 0.02),                   # kappa_retained: samples where the MP is co-expressed
-    ("decoy.n_null_floor", 20),
+    ("decoy.min_kappa", 0.02),                   # kappa_retained: minimum excess of an entering sample
+    ("decoy.n_null_floor", N_NULL_FLOOR),        # kappa_retained: random sets behind bg and its SD
     ("tme.spillover_adjust", True),              # (b) is defined on the adjusted statistic
     ("tme.rho_sensitivity", RHO_SENSITIVITY),
     ("tme.null_match", "expression+specificity"),
@@ -158,15 +213,34 @@ REGISTERED_SETTINGS = (
     ("tme.n_markers", 50),                       # the markers behind rho_hat
     ("tme.min_marker_fold", 8.0),
     ("protocol.kappa_min_effect", KAPPA_MIN_EFFECT),
-    ("protocol.kappa_active", KAPPA_ACTIVE),
     ("protocol.min_pairs", MIN_PAIRS),           # more: replicates fall back to the narrower random-set null
     ("protocol.n_null_sets", 100),
     ("positional.enabled", True),                # off: no arm-enrichment dosage exclusion
 )
+# Constants of the rule fixed in code (not config settings): (module.NAME, value). rule_text states them and
+# tests/test_report_rule.py pins them; changing one is a new rule version.
+FIXED_CONSTANTS = (
+    ("protocol.KAPPA_FLOOR", KAPPA_FLOOR),          # κ floored before the log
+    ("protocol.NULL_ALPHA", NULL_ALPHA),            # level of each one-sided null bound (t bound, order statistic)
+    ("protocol.MIN_RANDOM_SETS", MIN_RANDOM_SETS),  # finite random-set changes for a tumour's random-set bound
+    ("protocol.KAPPA_BOOT", KAPPA_BOOT),            # bootstrap resamples behind the self bound
+    ("protocol.KAPPA_SELF_Z", KAPPA_SELF_Z),        # z of the self bound
+    ("protocol.MAX_KAPPA_CELLS", MAX_KAPPA_CELLS),  # κ cells per sample at most (else the tumour's smallest sample)
+    ("protocol.MIN_CELLS", MIN_CELLS),              # malignant cells a sample needs for (c)
+    ("protocol.MIN_DETECT", MIN_DETECT),            # panel: detected in >= this share of cells under each protocol
+    ("protocol.MIN_IOTA", MIN_IOTA),                # panel retention below which the MP's κ is undefined
+    ("protocol.MIN_GENES", MIN_GENES),              # panel genes needed for κ
+    ("decoy.EXCESS_ENTRY_SD", EXCESS_ENTRY_SD),     # kappa_retained entry: excess > this many SDs of the sets
+    ("decoy.MIN_FLOOR_SETS", MIN_FLOOR_SETS),       # kappa_retained entry: random sets of finite kappa needed
+    ("decoy.MIN_CELLS", DECOY_MIN_CELLS),           # kappa_retained: cells a sample needs
+    ("decoy.MIN_DETECT", DECOY_MIN_DETECT),         # kappa_retained: the MP's genes detected in >= this share ...
+    ("decoy.MIN_GENES", DECOY_MIN_GENES),           # ... at least this many of them
+)
 # keyword of rule_text -> the registered setting it states
-_RULE_TEXT_SETTINGS = {"n_decoys": "decoy.n", "min_jaccard": "min_jaccard", "rho_sensitivity": "tme.rho_sensitivity",
-                       "kappa_min_effect": "protocol.kappa_min_effect", "kappa_active": "protocol.kappa_active",
-                       "min_pairs": "protocol.min_pairs"}
+_RULE_TEXT_SETTINGS = {"n_decoys": "decoy.n", "min_kappa": "decoy.min_kappa", "n_null_floor": "decoy.n_null_floor",
+                       "min_jaccard": "min_jaccard", "rho_sensitivity": "tme.rho_sensitivity",
+                       "kappa_min_effect": "protocol.kappa_min_effect", "min_pairs": "protocol.min_pairs",
+                       "n_null_sets": "protocol.n_null_sets"}
 _SHOWN = {"protocol.kappa_min_effect": f"{KAPPA_MIN_EFFECT:.6g} (log 1.5)"}
 A1_NULLS = ("null_q95", "null_q99")
 # keys of the rule before P1-GO v1.0 and what replaced them
@@ -332,7 +406,7 @@ def _all_deviations(rule: dict, deviations, settings: dict | None = None) -> lis
 
 
 def rule_label(deviations=()) -> str:
-    """``RULE_VERSION``, or ``'P1-GO v1.2 (unregistered variant: setting=value, ...)'``."""
+    """``RULE_VERSION``, or ``'P1-GO v1.3 (unregistered variant: setting=value, ...)'``."""
     devs = _as_deviations(deviations)
     if not devs:
         return RULE_VERSION
@@ -367,10 +441,11 @@ def _arm_summary(dec: pd.DataFrame, arms: list[str], rule: dict, mps: list[str],
 
     A hit needs >= ``min_hits`` hits and ``kappa_retained`` >= ``min_kappa_retained`` and, with
     ``require_power`` (technical arms, criterion a), >= ``min_decoys`` decoys. ``powered`` says
-    whether any of the arms ran >= ``min_decoys`` decoys.
+    whether any of the arms ran >= ``min_decoys`` decoys. The reported arm is the first hit, else the
+    arm with the most hits; ``kappa_retained_n_samples`` is NaN for a table without that column.
     """
     res = pd.DataFrame({"mp": mps, "hit": False, "best_arm": "", "hits": np.nan, "n_decoys": np.nan,
-                        "kappa_retained": np.nan, "powered": False})
+                        "kappa_retained": np.nan, "kappa_retained_n_samples": np.nan, "powered": False})
     if dec is None or dec.empty:
         return res
     missing = sorted({"mp", "arm", "n_decoys", "hits", "kappa_retained"} - set(dec.columns))
@@ -388,15 +463,16 @@ def _arm_summary(dec: pd.DataFrame, arms: list[str], rule: dict, mps: list[str],
         if require_power:
             ok &= rows["n_decoys"] >= rule["min_decoys"]
         best = rows.loc[ok].iloc[0] if ok.any() else rows.sort_values("hits", ascending=False).iloc[0]
-        res.loc[row_of[mp], ["hit", "best_arm", "hits", "n_decoys", "kappa_retained"]] = [
-            bool(ok.any()), best["arm"], best["hits"], best["n_decoys"], best["kappa_retained"]]
+        res.loc[row_of[mp], ["hit", "best_arm", "hits", "n_decoys", "kappa_retained", "kappa_retained_n_samples"]] = [
+            bool(ok.any()), best["arm"], best["hits"], best["n_decoys"], best["kappa_retained"],
+            best.get("kappa_retained_n_samples", np.nan)]
     res["hit"] = res["hit"].astype(bool)
     return res
 
 
 def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict | None = None,
            curated_artefacts: pd.Series | None = None, deviations=None):
-    """Apply ``P1-GO v1.2``. Returns ``(decision, flags)``.
+    """Apply ``P1-GO v1.3``. Returns ``(decision, flags)``.
 
     ``tables`` holds the axis outputs under the names :func:`mpaudit.pipeline.run_p1` uses
     (``decoy_recruitment``, ``tme_covariation``, ``protocol_shift``, ``positional``,
@@ -407,8 +483,10 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict | None = N
     no labels were given (``decision['curated_labels_given']`` False). ``deviations`` lists the
     deviations from the registered settings outside ``rule`` (:func:`rule_deviations` of the run's
     config); those of ``rule`` itself are found here. With any, ``decision['rule_version']`` reads
-    ``P1-GO v1.2 (unregistered variant: ...)``, ``decision['registered_rule']`` is False and
-    ``decision['deviations']`` lists them.
+    ``P1-GO v1.3 (unregistered variant: ...)``, ``decision['registered_rule']`` is False and
+    ``decision['deviations']`` lists them. Criterion (c) is powered when some MP has >=
+    ``min_paired_tumours`` tested paired tumours (``n_paired_tumours`` of the ``protocol_shift``
+    table: change, null bound and self bound defined; no activity gate).
     """
     rule = validate_rule(rule)
     devs = _all_deviations(rule, deviations)
@@ -429,7 +507,7 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict | None = N
                                "spill_adjusted", "partial_r2_rho", "slope_rho", "null_q95_rho", "null_q99_rho",
                                "partial_r2_unadjusted", "kappa_ratio_median"])
     attach("protocol_shift", ["n_paired_tumours", "null_type", "n_null_tumours", "mean_delta_log_kappa",
-                              "frac_loss_beyond_null_kappa", "mean_delta_intensity"])
+                              "frac_loss_beyond_null_kappa", "frac_gain_beyond_null_kappa", "mean_delta_intensity"])
     attach("instability_per_mp", ["recovery_all"])
     attach("positional", ["best_arm", "best_arm_excluding_known_clusters", "q_excluding_known_clusters"])
     flags = flags.rename(columns={"best_arm": "positional_arm",
@@ -447,9 +525,17 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict | None = N
     flags["tech_decoy_hits"] = tech["hits"].to_numpy()
     flags["tech_decoy_n"] = tech["n_decoys"].to_numpy()
     flags["tech_kappa_retained"] = tech["kappa_retained"].to_numpy()
+    flags["tech_kappa_retained_n_samples"] = tech["kappa_retained_n_samples"].to_numpy()
     flags["dosage_decoy_hits"] = dose["hits"].to_numpy()
     flags["dosage_decoy_n"] = dose["n_decoys"].to_numpy()
     flags["dosage_kappa_retained"] = dose["kappa_retained"].to_numpy()
+    flags["dosage_kappa_retained_n_samples"] = dose["kappa_retained_n_samples"].to_numpy()
+    # MPs whose kappa_retained is undefined (no sample entered) in an arm of the rule: no hit possible there
+    undefined = []
+    if dec is not None and not dec.empty:
+        rule_arms = dec[dec["arm"].isin(rule["technical_arms"] + rule["dosage_arms"]) & dec["mp"].isin(mps)]
+        undefined = [f"{m} ({a})" for m, a in rule_arms.loc[rule_arms["kappa_retained"].isna(), ["mp", "arm"]]
+                     .itertuples(index=False)]
 
     expected = _expected_tme_shared(mp_sets, rule)
     flags["expected_tme_shared"] = flags["mp"].map(lambda m: expected.get(m, ""))
@@ -489,7 +575,12 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict | None = N
     flags["crit_c_protocol"] = ((flags["n_paired_tumours"] >= rule["min_paired_tumours"])
                                 & (flags["frac_loss_beyond_null_kappa"] >= rule["protocol_frac"])
                                 ).fillna(False).to_numpy(dtype=bool)
+    # powered: some MP with >= min_paired_tumours tested paired tumours (n_paired_tumours counts the tested ones)
     protocol_powered = bool((flags["n_paired_tumours"] >= rule["min_paired_tumours"]).any())
+    # informational: the gain mirror of (c), a count of MPs meeting (c) by chance when gains are as likely as losses
+    flags["info_gain_mirror_c"] = ((flags["n_paired_tumours"] >= rule["min_paired_tumours"])
+                                   & (flags["frac_gain_beyond_null_kappa"] >= rule["protocol_frac"])
+                                   ).fillna(False).to_numpy(dtype=bool)
 
     flags["nuisance_supported"] = flags[["crit_a_tech_decoy", "crit_b_tme", "crit_c_protocol"]].any(axis=1)
     flags["counted"] = flags["nuisance_supported"] & ~flags["curated_artefact"] & ~flags["dosage"]
@@ -516,6 +607,8 @@ def decide(mp_sets: dict, tables: dict[str, pd.DataFrame], rule: dict | None = N
         "a1_rho_sensitivity_run": bool(rho_run.any()),
         "rho_sensitive_mps": flags.loc[above & not_expected & rho_run & ~rho_ok, "mp"].tolist(),
         "ignored_decoy_arms": ignored_arms,
+        "kappa_retained_undefined": undefined,
+        "gain_mirror_mps": flags.loc[flags["info_gain_mirror_c"], "mp"].tolist(),
     }
     return decision, flags
 
@@ -546,28 +639,32 @@ def rule_settings(cfg: dict) -> dict:
     dc, tme, prc = cfg.get("decoy") or {}, cfg.get("tme") or {}, cfg.get("protocol") or {}
     rho = tme.get("rho_sensitivity", RHO_SENSITIVITY)
     return {"n_decoys": int(dc.get("n", 5)),
+            "min_kappa": float(dc.get("min_kappa", 0.02)),
+            "n_null_floor": int(dc.get("n_null_floor", N_NULL_FLOOR)),
             "kappa_min_effect": float(prc.get("kappa_min_effect", KAPPA_MIN_EFFECT)),
             "rho_sensitivity": None if rho is None else float(rho),
             "min_pairs": int(prc.get("min_pairs", MIN_PAIRS)),
-            "kappa_active": float(prc.get("kappa_active", KAPPA_ACTIVE)),
+            "n_null_sets": int(prc.get("n_null_sets", 100)),
             "min_jaccard": float(cfg.get("min_jaccard", MIN_JACCARD))}
 
 
-def rule_text(rule: dict | None = None, *, n_decoys: int = 5, kappa_min_effect: float = KAPPA_MIN_EFFECT,
-              rho_sensitivity: float | None = RHO_SENSITIVITY, min_pairs: int = MIN_PAIRS,
-              kappa_active: float = KAPPA_ACTIVE, min_jaccard: float = MIN_JACCARD, deviations=None) -> str:
+def rule_text(rule: dict | None = None, *, n_decoys: int = 5, min_kappa: float = 0.02,
+              n_null_floor: int = N_NULL_FLOOR, kappa_min_effect: float = KAPPA_MIN_EFFECT,
+              rho_sensitivity: float | None = RHO_SENSITIVITY, min_pairs: int = MIN_PAIRS, n_null_sets: int = 100,
+              min_jaccard: float = MIN_JACCARD, deviations=None) -> str:
     """The rule as applied, in one paragraph (for ``summary.md`` and ``run_config.json``).
 
-    ``n_decoys`` (``decoy.n``), ``kappa_min_effect``, ``kappa_active``, ``min_pairs``
-    (``protocol``), ``rho_sensitivity`` (``tme``) and ``min_jaccard`` are the settings the axes ran
-    with (:func:`rule_settings` reads them from a config); they are stated, not applied, here, and
-    any that differs from its registered value (:data:`REGISTERED_SETTINGS`) is a deviation.
-    ``deviations`` as for :func:`decide`: with any, the paragraph names the rule an unregistered
-    variant and lists them."""
+    ``n_decoys``, ``min_kappa``, ``n_null_floor`` (``decoy``), ``kappa_min_effect``, ``min_pairs``,
+    ``n_null_sets`` (``protocol``), ``rho_sensitivity`` (``tme``) and ``min_jaccard`` are the settings
+    the axes ran with (:func:`rule_settings` reads them from a config); they are stated, not applied,
+    here, and any that differs from its registered value (:data:`REGISTERED_SETTINGS`) is a deviation.
+    The constants fixed in code (:data:`FIXED_CONSTANTS`) are stated as they are. ``deviations`` as for
+    :func:`decide`: with any, the paragraph names the rule an unregistered variant and lists them."""
     r = validate_rule(rule)
-    devs = _all_deviations(r, deviations, {"n_decoys": n_decoys, "kappa_min_effect": kappa_min_effect,
-                                           "rho_sensitivity": rho_sensitivity, "min_pairs": min_pairs,
-                                           "kappa_active": kappa_active, "min_jaccard": min_jaccard})
+    devs = _all_deviations(r, deviations, {"n_decoys": n_decoys, "min_kappa": min_kappa, "n_null_floor": n_null_floor,
+                                           "kappa_min_effect": kappa_min_effect, "rho_sensitivity": rho_sensitivity,
+                                           "min_pairs": min_pairs, "n_null_sets": n_null_sets,
+                                           "min_jaccard": min_jaccard})
     a1 = r["a1_null"]
     if rho_sensitivity is not None and rho_sensitivity != 1:
         rho = (f", which also holds with every rho_hat multiplied by {rho_sensitivity:g} (slope_rho > 0 and "
@@ -579,31 +676,49 @@ def rule_text(rule: dict | None = None, *, n_decoys: int = 5, kappa_min_effect: 
                   "loss)")
     else:
         margin = " (no minimum effect)"
+    level = 1 - NULL_ALPHA
     text = (
         f"Rule {rule_label(devs)}: GO if >= {r['min_mps']} retained, non-dosage MPs have nuisance support: "
         f"(a) a technical decoy arm ({', '.join(r['technical_arms']) or 'none'}) recruits the MP (a decoy MP at "
         f"Jaccard >= {min_jaccard:g} to it) in >= {r['min_hits']} of its {n_decoys} decoys (>= {r['min_decoys']} "
-        f"needed) with kappa_retained >= {r['min_kappa_retained']:g}; or (b) a spillover-adjusted (spill_adjusted) "
-        f"TME association with slope > 0 and partial R^2 above the random-gene-set {a1} in >= "
-        f"{r['min_a1_samples']} samples{rho}, for MPs not pre-declared as expected TME-shared (named, or "
-        f"overlapping a pre-declared gene set by >= {r['min_overlap']} genes); or (c) a one-sided kappa loss under "
-        f"the dissociation-free protocol in >= {r['protocol_frac']:g} of >= {r['min_paired_tumours']} paired "
-        f"tumours where the MP is active, a tumour's loss being a change in log kappa (test - reference) below the "
-        f"null bound{margin}. The null bound is a one-sided 95% t prediction bound from same-protocol replicate "
-        f"pairs of >= {min_pairs} distinct tumours, otherwise matched random gene sets carried to the MP's kappa "
-        f"level on the linear scale. Active: the MP's kappa under the reference or the test protocol (mean over the "
-        f"tumour's samples under it) is above max({kappa_active:g}, the q95 of the matched random gene sets' kappa "
-        f"in the same samples); a replicate pair enters the null only where the MP is active in at least one "
-        f"piece. Curated artefacts (labelled, or carried onto re-derived MPs at Jaccard >= {min_jaccard:g}) are "
-        f"not counted; dosage MPs (arm enrichment q, known positional gene clusters excluded, < "
-        f"{r['positional_q']:g}, or a dosage decoy arm ({', '.join(r['dosage_arms']) or 'none'}) with >= "
-        f"{r['min_hits']} hits and kappa_retained >= {r['min_kappa_retained']:g}, whatever the number of decoys) "
-        f"are labelled, not counted. INCOMPLETE if no criterion is powered: (a) >= {r['min_decoys']} decoys in "
-        f"some technical arm; (b) for some MP, >= {r['min_a1_samples']} samples with TME cells, a finite null and "
-        f"the spillover adjusted; (c) for some MP, >= {r['min_paired_tumours']} paired tumours where it is active "
-        f"and its kappa change and null bound are defined. Otherwise PIVOT. Instability, positional flags outside "
-        f"the dosage rule, the within-sample kappa ratio (kappa_ratio_median, not spillover-adjusted), A4 "
-        f"intensity and prevalence and the trivial typer are informational."
+        f"needed) with kappa_retained >= {r['min_kappa_retained']:g}, kappa_retained being the share of the MP's "
+        f"co-expression in excess of matched random gene sets that the decoys keep: per malignant sample of >= "
+        f"{DECOY_MIN_CELLS} cells, on the MP's genes detected in >= {DECOY_MIN_DETECT:.0%} of its cells (at least "
+        f"{DECOY_MIN_GENES}), (kappa_decoy - bg_decoy) / (kappa_real - bg_real), bg the median kappa of "
+        f"{n_null_floor} random gene sets matched on mean expression and detection, its median over the samples "
+        f"where kappa_real - bg_real > "
+        f"max({min_kappa:g}, {EXCESS_ENTRY_SD:g} SD of the sets' kappa) with >= {MIN_FLOOR_SETS} sets of finite "
+        f"kappa, averaged over the arm's decoys (undefined, so no hit, when no sample qualifies); or (b) a "
+        f"spillover-adjusted (spill_adjusted) TME association with slope > 0 and partial R^2 above the "
+        f"random-gene-set {a1} in >= {r['min_a1_samples']} samples{rho}, for MPs not pre-declared as expected "
+        f"TME-shared (named, or overlapping a pre-declared gene set by >= {r['min_overlap']} genes); or (c) a "
+        f"one-sided kappa loss under the dissociation-free protocol in >= {r['protocol_frac']:g} of >= "
+        f"{r['min_paired_tumours']} tested paired tumours, a tumour's loss being a change in log kappa (test - "
+        f"reference; kappa floored at {KAPPA_FLOOR:g}) below the null bound, below the self bound{margin}. Kappa "
+        f"is that of the MP's genes in the tumour's panel (detected in >= {MIN_DETECT:.0%} of its malignant cells "
+        f"under each protocol; undefined with fewer than {MIN_GENES} panel genes or less than {MIN_IOTA:g} of the "
+        f"MP's genes in the panel), in samples of >= {MIN_CELLS} malignant cells. Every paired tumour with a "
+        f"defined change, null bound and self bound is tested (no activity gate); every sample of a tumour is "
+        f"scored on the same number of cells (the tumour's smallest sample, at most {MAX_KAPPA_CELLS}), their "
+        f"counts binomially thinned to the tumour's lowest median count per cell. The null bound is, with "
+        f"same-protocol replicate pairs from >= {min_pairs} distinct tumours, the lower of two one-sided "
+        f"{level:.0%} t prediction bounds, on the linear kappa changes (carried to the MP's kappa level) and on the "
+        f"log kappa changes; otherwise the k-th smallest linear kappa change, k = floor({NULL_ALPHA:g} (n + 1)), of "
+        f"the n >= {MIN_RANDOM_SETS} random gene sets with a defined change ({n_null_sets} drawn per tumour and MP, "
+        f"matched on mean expression and detection), carried to the MP's kappa level, a tumour whose k-th smallest "
+        f"change is not below its k-th largest not being tested. The self bound is -{KAPPA_SELF_Z:g} times the "
+        f"bootstrap SE ({KAPPA_BOOT} resamples of each sample's cells, drawn per seed, sample and MP) of the MP's "
+        f"own linear kappa change, carried to its kappa level; a tumour with an undefined SE is not tested. Curated "
+        f"artefacts (labelled, or carried onto re-derived MPs at Jaccard >= {min_jaccard:g}) are not counted; "
+        f"dosage MPs (arm enrichment q, known positional gene clusters excluded, < {r['positional_q']:g}, or a "
+        f"dosage decoy arm ({', '.join(r['dosage_arms']) or 'none'}) with >= {r['min_hits']} hits and "
+        f"kappa_retained >= {r['min_kappa_retained']:g}, whatever the number of decoys) are labelled, not "
+        f"counted. INCOMPLETE if no criterion is powered: (a) >= {r['min_decoys']} decoys in some technical arm; "
+        f"(b) for some MP, >= {r['min_a1_samples']} samples with TME cells, a finite null and the spillover "
+        f"adjusted; (c) for some MP, >= {r['min_paired_tumours']} tested paired tumours. Otherwise PIVOT. "
+        f"Instability, positional flags outside the dosage rule, the within-sample kappa ratio "
+        f"(kappa_ratio_median, not spillover-adjusted), the kappa activity columns, A4 intensity and prevalence "
+        f"and the trivial typer are informational."
     )
     if devs:
         text += f" This is NOT the registered rule {RULE_VERSION}; deviations: {_deviation_list(devs)}."
@@ -624,11 +739,13 @@ def _nmf_fits_line(nmf_fits: dict) -> str:
 
 
 def write_summary(path: Path, decision: dict, flags: pd.DataFrame, tables: dict, cfg: dict,
-                  nmf_fits: dict | None = None, input_files: dict | None = None) -> None:
+                  nmf_fits: dict | None = None, input_files: dict | None = None,
+                  notes: list[str] | None = None) -> None:
     """Write ``summary.md``: the verdict (opening with a bold warning for an unregistered
     variant), the rule as applied (:func:`rule_text`), exclusions, the NMF fit diagnostics
     (``nmf_fits`` as in ``run_config.json``), the input files' sha256 (``input_files``, setting ->
-    ``{"path", "sha256"}``), notes and the per-MP and per-run tables."""
+    ``{"path", "sha256"}``), notes (the run's own ``notes``, e.g. axes that did not run, first) and
+    the per-MP and per-run tables."""
     rule = validate_rule(cfg.get("decision"))
     devs = _all_deviations(rule, decision.get("deviations"))
     powered = ", ".join(k for k, v in decision["powered"].items() if v) or "none"
@@ -655,7 +772,7 @@ def write_summary(path: Path, decision: dict, flags: pd.DataFrame, tables: dict,
     if input_files:
         parts.append("Input files (sha256, first 16 hex digits; full digests in run_config.json): " + "; ".join(
             f"{k} {Path(v['path']).name} {v['sha256'][:16]}" for k, v in input_files.items()) + ".\n")
-    notes = []
+    notes = list(notes or [])
     unadjusted = decision.get("a1_unadjusted_mps") or []
     if unadjusted:
         notes.append(f"Spillover NOT adjusted for {len(unadjusted)} MP(s) (too few malignant-specific markers, or "
@@ -670,15 +787,27 @@ def write_summary(path: Path, decision: dict, flags: pd.DataFrame, tables: dict,
     if decision.get("ignored_decoy_arms"):
         notes.append(f"Decoy arm(s) ignored by the rule (in neither technical_arms nor dosage_arms): "
                      f"{', '.join(decision['ignored_decoy_arms'])}.")
+    if decision.get("kappa_retained_undefined"):
+        notes.append("kappa_retained undefined (no sample's excess co-expression passed the entry rule), so no "
+                     "criterion (a) hit or dosage typing in that arm: "
+                     f"{', '.join(decision['kappa_retained_undefined'])}.")
+    if decision["powered"].get("protocol") and "gain_mirror_mps" in decision:
+        mirror = decision["gain_mirror_mps"]
+        notes.append(f"Gain mirror of criterion (c) (informational null count: a kappa gain in >= "
+                     f"{rule['protocol_frac']:g} of >= {rule['min_paired_tumours']} tested paired tumours; with no "
+                     f"protocol effect gains are as likely as losses): {len(mirror)} MP(s)"
+                     + (f": {', '.join(mirror)}." if mirror else "."))
     if "kappa_ratio_median" in flags and flags["kappa_ratio_median"].notna().any():
         notes.append("kappa_ratio_median (within-sample TME/malignant kappa ratio) is not spillover-adjusted and is "
                      "not used by the rule.")
     if notes:
         parts += ["**Notes.** " + " ".join(notes) + "\n"]
     a1 = rule["a1_null"]
-    cols = ["mp", "tech_decoy_hits", "tech_decoy_n", "tech_kappa_retained", "dosage_decoy_hits", "spill_adjusted",
+    cols = ["mp", "tech_decoy_hits", "tech_decoy_n", "tech_kappa_retained", "tech_kappa_retained_n_samples",
+            "dosage_decoy_hits", "spill_adjusted",
             "partial_r2", a1, "slope", "partial_r2_rho", f"{a1}_rho", "partial_r2_unadjusted", "kappa_ratio_median",
-            "n_paired_tumours", "frac_loss_beyond_null_kappa", "positional_arm", "positional_arm_excluding_known",
+            "n_paired_tumours", "frac_loss_beyond_null_kappa", "frac_gain_beyond_null_kappa", "positional_arm",
+            "positional_arm_excluding_known",
             "q_excluding_known_clusters", "recovery_all", "expected_tme_shared", "dosage", "curated_artefact",
             "crit_a_tech_decoy", "crit_b_tme", "crit_c_protocol", "counted"]
     parts += ["## Per-MP flags\n", _md_table(flags[[c for c in dict.fromkeys(cols) if c in flags]], max_rows=None)]

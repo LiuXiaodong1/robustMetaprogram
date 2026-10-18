@@ -1,13 +1,17 @@
 """Pilot P1 runner: audit a set of MPs (re-derived or published) along every available axis and
-apply the frozen GO rule (:mod:`mpaudit.report`, ``P1-GO v1.2``).
+apply the frozen GO rule (:mod:`mpaudit.report`, ``P1-GO v1.3``).
 
-:func:`validate_config` checks the whole configuration before any NMF runs: the ``decision`` block
-(:func:`mpaudit.report.validate_rule`), the decoy arms against the rule's arm lists and the cohort's
-obs columns (no NaN in malignant cells), the label and gene-set files, names that cannot match
-re-derived MPs, the GavishParams/keys combination, the registered settings against their registered
-values and the inputs the dosage and curated-artefact exclusions need (:func:`config_deviations`).
-A config that deviates is refused unless its top-level ``unregistered_variant`` is true; the verdict
-is then labelled an unregistered variant.
+:func:`validate_config` checks the whole configuration before any NMF runs: unknown keys, the
+``decision`` block (:func:`mpaudit.report.validate_rule`), the keys against the cohort's obs
+columns, the decoy arms against the rule's arm lists and the cohort's obs columns (no NaN in
+malignant cells), the label, gene-set, cytoband and GTF files, names that cannot match re-derived
+MPs, the GavishParams/keys combination, the registered settings against their registered values
+and the inputs the dosage and curated-artefact exclusions need (:func:`config_deviations`).
+:func:`run_p1` then checks, still before any NMF, that the gene positions and the cytoband place
+genes on chromosome arms. A config that deviates is refused unless its top-level
+``unregistered_variant`` is true; the verdict is then labelled an unregistered variant. An axis
+that is switched on but cannot run (e.g. the protocol axis without protocol names) is logged and
+noted in ``summary.md``; the protocol case is also warned about by :func:`validate_config`.
 
 Curated-artefact labels (``typer.labels``, a CSV with columns ``mp`` and ``label``, 1 = curated
 artefact) and expected-TME-shared names are matched to the audited MPs by name. Re-derived MPs
@@ -33,12 +37,12 @@ import pandas as pd
 
 from .compare import jaccard_matrix, match_sets
 from .data import QC_COLUMNS, Keys, add_qc_obs, malignant_mask, read_gmt, sample_map, write_gmt
-from .decoy import decoy_recruitment
-from .gavish import GavishParams, NMFCache, check_keys, eligible_universe, run_gavish
+from .decoy import MIN_FLOOR_SETS, N_NULL_FLOOR, decoy_recruitment
+from .gavish import GavishParams, NMFCache, check_keys, code_version, eligible_universe, run_gavish
 from .instability import default_perturbations, run_instability
 from .positional import (arm_enrichment, assign_arms, centromeres, gene_lengths, gene_positions_from_gtf,
                          load_cytoband)
-from .protocol import KAPPA_ACTIVE, KAPPA_MIN_EFFECT, MIN_PAIRS, protocol_shift_kappa
+from .protocol import KAPPA_ACTIVE, KAPPA_MIN_EFFECT, MIN_PAIRS, MIN_RANDOM_SETS, protocol_shift_kappa
 from .report import (DEFAULT_RULE, MIN_JACCARD, RHO_SENSITIVITY, RULE_VERSION, decide, rule_deviations, rule_label,
                      rule_settings, rule_text, validate_rule, write_summary)
 from .tme import NULL_MATCH, tme_covariation
@@ -54,7 +58,7 @@ DEFAULT_CONFIG = {
     "cache_dir": None,
     "min_jaccard": MIN_JACCARD,   # MP match threshold: decoy hits (criterion a), label carry-over, instability
     # true: run a config that deviates from the registered rule (mpaudit.report.rule_deviations); the
-    # verdict is then labelled "P1-GO v1.2 (unregistered variant: ...)". false: such a config is refused.
+    # verdict is then labelled "P1-GO v1.3 (unregistered variant: ...)". false: such a config is refused.
     "unregistered_variant": False,
     "qc": {"add_obs": True},      # add log_umi, log_genes, pct_mito, pct_ribo to obs if missing
     "instability": {"enabled": True, "seeds": [1, 2, 3], "n_boot": 3, "boot_fraction": 0.8,
@@ -62,8 +66,10 @@ DEFAULT_CONFIG = {
     # arms: name -> obs columns the decoys condition on; categorical columns become permutation
     # strata, continuous ones enter the mean model. Every arm must be named in
     # decision.technical_arms or decision.dosage_arms. "strata" (one unnamed arm) is no longer accepted.
+    # min_kappa, n_null_floor: kappa_retained's entry, an excess over the median of n_null_floor matched random
+    # gene sets above max(min_kappa, 3 SD of theirs) (mpaudit.decoy)
     "decoy": {"enabled": True, "n": 5, "method": "residual", "arms": {}, "strata": [], "n_depth_bins": 1,
-              "min_kappa": 0.02, "n_null_floor": 20},
+              "min_kappa": 0.02, "n_null_floor": N_NULL_FLOOR},
     "tme": {"enabled": True, "min_cells": 20, "n_boot": 200, "n_null": 500, "covariates": None,
             "spillover_adjust": True, "null_match": "expression+specificity", "n_markers": 50,
             "min_marker_fold": 8.0, "rho_sensitivity": RHO_SENSITIVITY},
@@ -72,16 +78,25 @@ DEFAULT_CONFIG = {
     # labels: CSV with columns mp,label (1 = curated artefact); labelled_gmt: gene sets of the
     # labelled MPs, needed to carry the labels onto re-derived MPs
     "typer": {"enabled": True, "labels": None, "labelled_gmt": None},
-    # kappa_active: floor of the activity threshold max(kappa_active, random-set q95) that a tumour's MP
-    # must exceed in one of its two protocols to be tested for a kappa change (see mpaudit.protocol)
+    # kappa_active: informational only (not part of the rule, no gate): the floor of the activity threshold
+    # max(kappa_active, random-set q95) behind the kappa_active* columns of protocol_tumours (mpaudit.protocol)
     "protocol": {"enabled": True, "reference": None, "test": None, "min_pairs": MIN_PAIRS, "n_null_sets": 100,
                  "kappa_min_effect": KAPPA_MIN_EFFECT, "kappa_active": KAPPA_ACTIVE},
     "decision": dict(DEFAULT_RULE),
-    "seed": 0,                    # registered: decoys, random-gene-set nulls, cell subsamples
+    "seed": 0,                    # registered: decoys, random-gene-set nulls, cell subsamples, depth thinning
+                                  # and bootstrap resamples
 }
 MIN_POSITION_COVERAGE = 0.5  # warn when gene positions or lengths cover fewer var_names than this
 DECOY_METHODS = ("residual", "permute")
 _REDERIVED_NAME = re.compile(r"MP\d+")  # names mpaudit.gavish gives re-derived MPs
+# sections whose keys validate_config checks against DEFAULT_CONFIG; gavish (GavishParams), keys (Keys) and
+# decision (validate_rule) check their own keys
+_CHECKED_SECTIONS = ("qc", "instability", "decoy", "tme", "positional", "typer", "protocol")
+_SWITCHES = (("qc", "add_obs"), ("instability", "enabled"), ("instability", "leave_one_study_out"),
+             ("tme", "enabled"), ("typer", "enabled"), ("protocol", "enabled"))  # true/false settings
+# keys only the informational typer reads (doublet, intronic) or nothing reads (clone, region): one naming no obs
+# column is warned about, not refused (the typer skips a missing column)
+_INFORMATIONAL_KEYS = ("clone", "region", "doublet", "intronic")
 
 
 def merge_config(user: dict | None) -> dict:
@@ -171,6 +186,61 @@ def _flag(section: str, key: str, v) -> bool:
     return bool(v)
 
 
+def _check_known_keys(cfg: dict) -> None:
+    """Raise ``ValueError`` for config keys that no part of mpaudit reads: unknown top-level keys and
+    unknown keys in the sections of :data:`_CHECKED_SECTIONS` (all of them listed, with the valid
+    keys). A misspelt key would otherwise run with the default silently: ``tme.rho_sensitvity:
+    null``, meant as a variant, would run as registered, and ``protocol.referance`` would leave
+    criterion (c) unpowered. The ``decision``, ``keys`` and ``gavish`` blocks refuse unknown keys
+    themselves."""
+    bad = [f"{k!r}" for k in cfg if k not in DEFAULT_CONFIG]
+    for sec in _CHECKED_SECTIONS:
+        if not isinstance(cfg[sec], dict):
+            raise ValueError(f"config section {sec} must be a mapping of settings, got {cfg[sec]!r}")
+        bad += [f"'{sec}.{k}' (valid: {', '.join(DEFAULT_CONFIG[sec])})" for k in cfg[sec]
+                if k not in DEFAULT_CONFIG[sec]]
+    if bad:
+        raise ValueError(f"unknown config key(s), probably misspelt (no part of mpaudit reads them): {'; '.join(bad)}. "
+                         f"Valid top-level keys: {', '.join(DEFAULT_CONFIG)}")
+
+
+def _is_file(path) -> bool:
+    return isinstance(path, (str, Path)) and bool(str(path)) and Path(path).is_file()
+
+
+def _check_protocol_axis(cfg: dict, keys: Keys, adata, log) -> None:
+    """Refuse equal protocol names; warn when the protocol axis is on and ``keys.protocol`` is set but
+    the axis cannot pair a tumour (a protocol name missing, or with ``adata``, a name that is not a
+    value of the protocol column, or no tumour with both protocols), so criterion (c) would be
+    unpowered without a word."""
+    prc = cfg["protocol"]
+    names = {k: prc.get(k) for k in ("reference", "test")}
+    unset = [k for k, v in names.items() if v is None or not str(v)]
+    if not unset and str(names["reference"]) == str(names["test"]):
+        raise ValueError(f"protocol.reference and protocol.test must differ, got {names['reference']!r} for both")
+    if not (prc["enabled"] and keys.protocol):
+        return
+    if unset:
+        _warn(f"protocol.{' and protocol.'.join(unset)} not set: the protocol axis will not run, so criterion (c) "
+              "cannot be powered", log)
+        return
+    if adata is None:
+        return
+    prot = adata.obs[keys.protocol].astype(str)
+    levels = sorted(pd.unique(prot))
+    absent = [f"protocol.{k} {v!r}" for k, v in names.items() if str(v) not in levels]
+    if absent:
+        _warn(f"{' and '.join(absent)} not a value of adata.obs[{keys.protocol!r}] ({levels[:10]}): no tumour can be "
+              "paired, so criterion (c) cannot be powered", log)
+        return
+    mal = malignant_mask(adata, keys)
+    tumour = adata.obs[keys.tumour_col()].astype(str)[mal]
+    prot = prot[mal]
+    if not set(tumour[prot == str(names["reference"])]) & set(tumour[prot == str(names["test"])]):
+        _warn(f"no {keys.tumour_col()} has malignant cells under both protocol.reference {names['reference']!r} and "
+              f"protocol.test {names['test']!r}: no tumour can be paired, so criterion (c) cannot be powered", log)
+
+
 def _has_positions(adata, pc: dict) -> bool:
     """Whether ``adata.var`` has the gene position columns the positional axis falls back to."""
     return pc.get("chrom_col", "chromosome") in adata.var and pc.get("start_col", "start") in adata.var
@@ -186,8 +256,10 @@ def config_deviations(cfg: dict, adata=None) -> list[tuple[str, object, str]]:
       is excluded, and labels by name cannot be registered, since the run names the MPs;
     * with ``decoy.enabled``, an arm named in ``decision.dosage_arms`` (the dosage-arm exclusion);
     * with ``positional.enabled``, a cytoband and gene positions (``positional.gtf``, or with
-      ``adata`` given, the ``chrom_col``/``start_col`` columns of ``adata.var``; a GTF that places
-      no gene is caught by :func:`run_p1`) for the arm-enrichment exclusion.
+      ``adata`` given, the ``chrom_col``/``start_col`` columns of ``adata.var``) for the
+      arm-enrichment exclusion. Positions that place no var_name (e.g. a GTF whose gene names do not
+      match them) and a cytoband whose centromere bands place none of them on an arm are deviations
+      too; :func:`run_p1` finds them from the data, still before any NMF.
     """
     devs = rule_deviations(cfg)
     tc, pc, dc = cfg["typer"], cfg["positional"], cfg["decoy"]
@@ -258,35 +330,62 @@ def check_arm_values(adata, keys: Keys, arms: dict) -> None:
 def validate_config(cfg: dict, adata=None, log=print) -> dict:
     """Check a merged config (:func:`merge_config`) before anything runs; returns it normalised.
 
-    Raises ``ValueError`` for: an invalid ``decision`` block (:func:`mpaudit.report.validate_rule`);
+    Raises ``ValueError`` for: unknown keys at the top level or in a section other than
+    ``decision``, ``keys`` and ``gavish`` (:func:`_check_known_keys`; those three refuse unknown
+    keys themselves); an invalid ``decision`` block (:func:`mpaudit.report.validate_rule`);
+    with ``adata``, a key (``keys.*``) naming no column of ``adata.obs`` (warned about instead for
+    the informational keys ``clone``, ``region``, ``doublet`` and ``intronic``); a switch
+    (``*.enabled``, ``qc.add_obs``, ``instability.leave_one_study_out``) that is not true/false;
     ``decoy.strata`` (legacy; use ``decoy.arms``); a decoy arm named in neither
     ``decision.technical_arms`` nor ``decision.dosage_arms``; decoy arm columns missing from
     ``adata.obs`` (QC columns that ``qc.add_obs`` will add count as present; ``pct_long`` only
     with gene lengths from ``positional.gtf`` or ``adata.var['gene_length']``) or with NaN in
     malignant cells (:func:`check_arm_values`); ``decision.expected_tme_shared`` names with
-    ``mps: rederive``; a missing ``mps`` GMT, ``typer.labels`` or ``typer.labelled_gmt`` file, a
-    ``labelled_gmt`` without ``labels``, or, with ``mps: rederive`` and no ``labelled_gmt``, labels
-    none of which can name a re-derived MP; values of the wrong type or out of range for the
-    settings the rule reads (``tme.rho_sensitivity`` a number > 0 or null,
-    ``protocol.kappa_min_effect`` / ``kappa_active`` numbers >= 0, ``protocol.min_pairs`` a whole
-    number >= 1, ``seed`` a whole number >= 0, and the other
-    :data:`mpaudit.report.REGISTERED_SETTINGS`) and for ``unregistered_variant`` not true/false;
+    ``mps: rederive``; a missing ``mps`` GMT, ``typer.labels``, ``typer.labelled_gmt`` or
+    ``positional.gtf`` file, or, with the positional axis on, a ``positional.cytoband`` that is
+    neither null (a deviation) nor a table nor a file; a ``labelled_gmt`` without ``labels``, or,
+    with ``mps: rederive`` and no ``labelled_gmt``, labels none of which can name a re-derived MP;
+    equal ``protocol.reference`` and ``protocol.test``; values of the wrong type or out of range for
+    the settings the rule reads (``tme.rho_sensitivity`` a number > 0 or null,
+    ``protocol.kappa_min_effect`` a number >= 0, ``protocol.min_pairs`` a whole number >= 1,
+    ``protocol.n_null_sets`` 0 or a whole number >= ``mpaudit.protocol.MIN_RANDOM_SETS`` (20),
+    ``decoy.n_null_floor`` a whole number >= ``mpaudit.decoy.MIN_FLOOR_SETS`` (20), ``seed`` a whole
+    number >= 0, and the other :data:`mpaudit.report.REGISTERED_SETTINGS`), for the informational
+    ``protocol.kappa_active`` not a number >= 0 and for ``unregistered_variant`` not true/false;
     what :func:`mpaudit.gavish.check_keys` rejects; and, unless ``unregistered_variant`` is true,
     any deviation from the registered rule (:func:`config_deviations`; all of them listed, with
     their registered values). With ``unregistered_variant`` true the deviations are warned about
     instead.
 
     Warns when the TME axis can run (``tme.enabled`` and ``keys.cell_type``) but no
-    expected-TME-shared MP or gene set is pre-declared, and when MPs come from a GMT without
-    ``typer.labels`` (no MP is then treated as a curated artefact). Name checks against the audited
-    MPs themselves are in :func:`check_names`.
+    expected-TME-shared MP or gene set is pre-declared; when MPs come from a GMT without
+    ``typer.labels`` (no MP is then treated as a curated artefact); and when the protocol axis is
+    on and ``keys.protocol`` is set but no tumour can be paired (:func:`_check_protocol_axis`:
+    a protocol name not set, or with ``adata``, not a value of the protocol column or never paired
+    in one tumour), so criterion (c) would be unpowered. Name checks against the audited MPs
+    themselves are in :func:`check_names`; whether the gene positions and the cytoband place genes
+    on chromosome arms is checked by :func:`run_p1`, also before any NMF.
     """
+    _check_known_keys(cfg)
     cfg["decision"] = rule = validate_rule(cfg.get("decision"))
     rederive = cfg["mps"] == "rederive"
     if not rederive and not Path(str(cfg["mps"])).is_file():
         raise ValueError(f"mps must be 'rederive' or a GMT file, got {cfg['mps']!r}")
     keys = Keys.from_dict(cfg["keys"])
     check_keys(keys, GavishParams.from_dict(cfg["gavish"]), adata, recurrence_key=cfg["recurrence_key"])
+    if adata is not None:
+        cols = {k: v for k, v in vars(keys).items() if v and k != "malignant_label"}
+        missing = [f"keys.{k}={v!r}" for k, v in cols.items() if v not in adata.obs.columns
+                   and k not in _INFORMATIONAL_KEYS]
+        if missing:
+            raise ValueError(f"Not a column of adata.obs: {', '.join(missing)}")
+        ignored = [f"keys.{k}={v!r}" for k, v in cols.items()
+                   if v not in adata.obs.columns and k in _INFORMATIONAL_KEYS]
+        if ignored:
+            _warn(f"not a column of adata.obs, ignored (informational keys: the rule does not read them): "
+                  f"{', '.join(ignored)}", log)
+    for sec, key in _SWITCHES:
+        cfg[sec][key] = _flag(sec, key, cfg[sec].get(key, DEFAULT_CONFIG[sec][key]))
 
     dc = cfg["decoy"]
     arms = _decoy_arms(dc)
@@ -317,7 +416,8 @@ def validate_config(cfg: dict, adata=None, log=print) -> dict:
     dc["n_depth_bins"] = _whole_number("decoy", "n_depth_bins", dc.get("n_depth_bins", 1), minimum=1)
     dc["min_kappa"] = _optional_number("decoy", "min_kappa", dc.get("min_kappa", 0.02), allow_none=False,
                                        minimum=0.0, strict=False)
-    dc["n_null_floor"] = _whole_number("decoy", "n_null_floor", dc.get("n_null_floor", 20), minimum=0)
+    dc["n_null_floor"] = _whole_number("decoy", "n_null_floor", dc.get("n_null_floor", N_NULL_FLOOR),
+                                       minimum=MIN_FLOOR_SETS)
 
     if rederive and rule["expected_tme_shared"]:
         raise ValueError(
@@ -370,7 +470,20 @@ def validate_config(cfg: dict, adata=None, log=print) -> dict:
                                            allow_none=False, minimum=0.0, strict=False)
     prc["min_pairs"] = _whole_number("protocol", "min_pairs", prc.get("min_pairs", MIN_PAIRS), minimum=1)
     prc["n_null_sets"] = _whole_number("protocol", "n_null_sets", prc.get("n_null_sets", 100), minimum=0)
-    cfg["positional"]["enabled"] = _flag("positional", "enabled", cfg["positional"].get("enabled", True))
+    if 0 < prc["n_null_sets"] < MIN_RANDOM_SETS:  # also refused as an unregistered variant: it tests nothing
+        raise ValueError(f"protocol.n_null_sets must be 0 (no random-set null) or >= {MIN_RANDOM_SETS}, got "
+                         f"{prc['n_null_sets']}: a tumour's random-set bound needs {MIN_RANDOM_SETS} random sets "
+                         "with a defined change, so every tumour on the random-set null would be left untested")
+    _check_protocol_axis(cfg, keys, adata, log)
+    pc = cfg["positional"]
+    pc["enabled"] = _flag("positional", "enabled", pc.get("enabled", True))
+    # the files the positional axis reads, checked now rather than when the axis runs (after the NMF); a cytoband
+    # left null is a deviation (config_deviations), and the GTF is read even with the axis off (gene lengths)
+    if pc["enabled"] and pc.get("cytoband") is not None and not isinstance(pc["cytoband"], pd.DataFrame) \
+            and not _is_file(pc["cytoband"]):
+        raise ValueError(f"positional.cytoband {pc['cytoband']!r} is not a file")
+    if pc.get("gtf") and not _is_file(pc["gtf"]):
+        raise ValueError(f"positional.gtf {pc['gtf']!r} is not a file")
     mj = _optional_number("", "min_jaccard", cfg.get("min_jaccard", MIN_JACCARD), allow_none=False, minimum=0.0,
                           strict=True)
     if mj > 1:
@@ -469,9 +582,9 @@ def _coverage(index, var_names) -> float:
 
 
 def _gtf_positions(adata, pc: dict, log) -> pd.DataFrame | None:
-    """Gene positions and lengths from ``positional.gtf``, or None. An empty table counts as missing
-    (callers fall back to ``adata.var``); one placing fewer than ``MIN_POSITION_COVERAGE`` of the
-    var_names warns."""
+    """Gene positions and lengths from ``positional.gtf``, or None. An empty table, or one that places
+    no var_name (e.g. Ensembl IDs as var_names), counts as missing (callers fall back to
+    ``adata.var``); one placing fewer than ``MIN_POSITION_COVERAGE`` of the var_names warns."""
     if not pc.get("gtf"):
         return None
     table = gene_positions_from_gtf(pc["gtf"])
@@ -479,6 +592,10 @@ def _gtf_positions(adata, pc: dict, log) -> pd.DataFrame | None:
         _warn(f"positional.gtf {pc['gtf']} gave no gene positions; falling back to adata.var columns", log)
         return None
     cov = _coverage(table.index, adata.var_names)
+    if cov == 0:
+        _warn(f"positional.gtf {pc['gtf']} places no var_name (they must match its gene_name values; Ensembl IDs do "
+              "not); falling back to adata.var columns", log)
+        return None
     if cov < MIN_POSITION_COVERAGE:
         _warn(f"positional.gtf {pc['gtf']} places only {cov:.0%} of var_names (they must match its gene_name "
               "values; Ensembl IDs do not)", log)
@@ -555,6 +672,16 @@ def _warn_failed_fits(what: str, fits: dict | None, log) -> None:
               "(all-zero rows of H; such a fit is unusable)", log)
 
 
+def _late_deviation(dev: tuple[str, object, str], problem: str, cfg: dict, deviations: list, log) -> None:
+    """A deviation found by :func:`run_p1` (still before any NMF) from the data rather than the config:
+    raise ``ValueError`` unless ``unregistered_variant`` is true, else append it and warn."""
+    if not cfg["unregistered_variant"]:
+        raise ValueError(f"{problem}: {dev[0]} = {dev[1]!r} (registered: {dev[2]}); this deviates from the registered "
+                         f"rule {RULE_VERSION}. Fix the input, or set unregistered_variant: true to run anyway")
+    deviations.append(dev)
+    _warn(f"unregistered variant: the verdict will be labelled '{rule_label(deviations)}', not {RULE_VERSION}", log)
+
+
 def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", log=print) -> dict:
     """Run the P1 audit and write its outputs to ``out_dir``; returns the decision, the tables, the
     reference run and the audited MP sets.
@@ -562,8 +689,17 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
     Besides one CSV per table: ``summary.md`` (:func:`mpaudit.report.write_summary`) and
     ``run_config.json`` (the normalised config, GavishParams, the rule label and text, the
     deviations from the registered rule, the sha256 of the input files (:func:`input_file_digests`),
-    package versions, the decision and ``nmf_fits``: capped and failed NMF fits of the reference run
-    and summed over the decoy and instability runs).
+    package versions, the decision, ``nmf_fits``: capped and failed NMF fits of the reference run
+    and summed over the decoy and instability runs, ``nmf_cache_code``: the code hashes in the NMF
+    cache keys (:func:`mpaudit.gavish.code_version`), and ``notes``: axes that did not run and why,
+    and how many genes were placed on chromosome arms; the notes also go into ``summary.md``).
+
+    Everything that can be checked without NMF is checked first: the config
+    (:func:`validate_config`), then the gene positions and the cytoband. With the positional axis
+    on, positions that place no var_name, or a cytoband whose centromere (``acen``) bands place none
+    of them on a chromosome arm, leave the arm-enrichment exclusion without input: a deviation,
+    refused unless ``unregistered_variant`` is true (fewer than ``MIN_POSITION_COVERAGE`` placed
+    warns).
     """
     cfg = validate_config(merge_config(config), adata, log)
     deviations = config_deviations(cfg, adata)
@@ -576,22 +712,36 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
     cache = NMFCache(cfg["cache_dir"])
     layer, rk, n_jobs, seed = cfg["counts_layer"], cfg["recurrence_key"], int(cfg["n_jobs"]), int(cfg["seed"])
     tables: dict[str, pd.DataFrame] = {}
+    notes: list[str] = []  # for summary.md and run_config.json: axes that did not run, genes placed on arms
     pc = cfg["positional"]
     # read once, before the QC columns (pct_long), for the positional axis and the typer
     gtf_positions = _gtf_positions(adata, pc, log) if pc.get("gtf") else None
-    positions = None
+    positions, arms_of_gene = None, None
     if pc["enabled"]:
         positions = gtf_positions if gtf_positions is not None else _var_positions(adata, pc, log)
         if (positions is None or positions.empty) and not any(d[0] == "positional.gtf" for d in deviations):
             # e.g. a GTF that places no var_name, with no positions in adata.var: no arm-enrichment exclusion
-            dev = ("positional.gtf", pc.get("gtf"), "gene positions: a GTF, or chromosome/start columns in adata.var")
-            if not cfg["unregistered_variant"]:
-                raise ValueError(f"no gene positions for the positional axis: {dev[0]} = {dev[1]!r} (registered: "
-                                 f"{dev[2]}); this deviates from the registered rule {RULE_VERSION}. Give positions, "
-                                 "or set unregistered_variant: true to run anyway")
-            deviations.append(dev)
-            _warn(f"unregistered variant: the verdict will be labelled '{rule_label(deviations)}', not "
-                  f"{RULE_VERSION}", log)
+            _late_deviation(("positional.gtf", pc.get("gtf"),
+                             "gene positions: a GTF, or chromosome/start columns in adata.var"),
+                            "no gene positions for the positional axis", cfg, deviations, log)
+        cyto = pc.get("cytoband")
+        if positions is not None and not positions.empty and cyto is not None:
+            # arms now, before any NMF: a cytoband without acen bands on the genes' chromosomes places no gene
+            arms_of_gene = assign_arms(positions, centromeres(cyto if isinstance(cyto, pd.DataFrame)
+                                                              else load_cytoband(cyto)))
+            n_placed = int(pd.Index(adata.var_names.astype(str)).isin(arms_of_gene.dropna().index.astype(str)).sum())
+            share = n_placed / max(adata.n_vars, 1)
+            notes.append(f"Gene positions and the cytoband place {n_placed} of {adata.n_vars} var_names ({share:.0%}) "
+                         "on chromosome arms (positional axis).")
+            log(f"[p1] chromosome arms: {n_placed} of {adata.n_vars} var_names placed")
+            if n_placed == 0:
+                arms_of_gene = None
+                _late_deviation(("positional.cytoband", cyto if isinstance(cyto, (str, Path)) else "<table>",
+                                 "a cytoband whose acen bands place the genes on chromosome arms"),
+                                "the cytoband places no gene on a chromosome arm (no centromere band on the genes' "
+                                "chromosomes)", cfg, deviations, log)
+            elif share < MIN_POSITION_COVERAGE:
+                _warn(f"gene positions and the cytoband place only {share:.0%} of var_names on chromosome arms", log)
     if cfg["qc"].get("add_obs", True):
         add_qc_obs(adata, counts_layer=layer,
                    gene_length=gene_lengths(gtf_positions) if gtf_positions is not None else None)
@@ -671,6 +821,7 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
         _warn_failed_fits("decoy runs", _fit_totals(per_decoy), log)
     elif dc["enabled"] and mp_sets:
         log("[p1] decoys skipped: no decoy arms configured")
+        notes.append("The decoy axis did not run (no decoy arms configured), so criterion (a) is not powered.")
 
     if cfg["tme"]["enabled"] and keys.cell_type and mp_sets:
         tc_ = cfg["tme"]
@@ -687,12 +838,12 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
             log(f"[p1] TME co-variation: spillover NOT adjusted for {len(unadjusted)} MP(s); criterion (b) cannot "
                 "count them")
         log("[p1] TME co-variation done")
+    elif cfg["tme"]["enabled"] and mp_sets:
+        log("[p1] TME axis skipped (needs keys.cell_type)")
+        notes.append("The TME axis did not run (needs keys.cell_type), so criterion (b) is not powered.")
 
     if pc["enabled"] and mp_sets:
-        cyto = pc.get("cytoband")
-        if positions is not None and not positions.empty and cyto is not None:
-            cyto_df = cyto if isinstance(cyto, pd.DataFrame) else load_cytoband(cyto)
-            arms_of_gene = assign_arms(positions, centromeres(cyto_df))
+        if arms_of_gene is not None:
             # background: genes that could enter an MP (union of the per-sample NMF universes)
             universe = eligible_universe(adata, keys, params, counts_layer=layer)
             a = arm_enrichment(mp_sets, arms_of_gene, universe)
@@ -703,7 +854,10 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
             tables["positional"] = a
             log(f"[p1] positional enrichment done (background: {len(universe)} eligible genes)")
         else:
-            log("[p1] positional axis skipped (needs gene positions and a cytoband file)")
+            why = ("no gene placed on a chromosome arm" if positions is not None and not positions.empty
+                   and pc.get("cytoband") is not None else "needs gene positions and a cytoband")
+            log(f"[p1] positional axis skipped ({why})")
+            notes.append(f"The positional axis did not run ({why}), so no MP can be typed dosage by arm enrichment.")
 
     if cfg["typer"]["enabled"] and mp_sets:
         lengths = _gene_lengths(adata, gtf_positions, log)
@@ -730,6 +884,11 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
         tables["protocol_tumours"] = per_tumour
         tables["protocol_levels"] = levels
         log("[p1] protocol shift done")
+    elif prc["enabled"] and mp_sets:
+        why = (f"needs keys.protocol, protocol.reference and protocol.test; got {keys.protocol!r}, "
+               f"{prc.get('reference')!r}, {prc.get('test')!r}")
+        log(f"[p1] protocol axis skipped ({why})")
+        notes.append(f"The protocol axis did not run ({why}), so criterion (c) is not powered.")
 
     decision, flags = decide(mp_sets, tables, cfg["decision"], curated_artefacts=labels, deviations=deviations)
     tables["mp_flags"] = flags
@@ -741,7 +900,8 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
                 "decoys": _fit_totals(tables.get("decoy_runs")),
                 "instability": _fit_totals(tables.get("instability_runs"))}
     inputs = input_file_digests(cfg)
-    write_summary(out / "summary.md", decision, flags, tables, cfg, nmf_fits=nmf_fits, input_files=inputs)
+    write_summary(out / "summary.md", decision, flags, tables, cfg, nmf_fits=nmf_fits, input_files=inputs,
+                  notes=notes)
     versions = {}
     for pkg in ("mpaudit", "numpy", "scipy", "pandas", "anndata"):
         try:
@@ -760,7 +920,9 @@ def run_p1(adata, config: dict | None = None, out_dir: str | Path = "results", l
     (out / "run_config.json").write_text(json.dumps(
         {"config": plain(cfg), "params": vars(params), "rule_version": decision["rule_version"],
          "registered_rule": decision["registered_rule"], "deviations": decision["deviations"], "rule": rule,
-         "input_files": inputs, "nmf_fits": nmf_fits, "versions": versions, "python": platform.python_version(),
+         "input_files": inputs, "nmf_fits": nmf_fits, "notes": notes, "versions": versions,
+         "python": platform.python_version(),
+         "nmf_cache_code": {"real": code_version(), "decoy": code_version(decoy_data=True)},
          "decision": decision},
         indent=2, default=str))
     log(f"[p1] decision: {decision['verdict']} ({decision['n_counted']} counted MPs; {decision['rule_version']}); "

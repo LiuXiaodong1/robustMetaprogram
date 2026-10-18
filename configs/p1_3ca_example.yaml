@@ -1,21 +1,27 @@
-# Example P1 configuration for a 3CA-style cohort (adapt column names to your AnnData).
-# Run:  mpaudit p1 cohort.h5ad --config configs/p1_3ca_example.yaml --out results/p1 --n-jobs 8
-# Fill in the `decision` block (pre-declared lists), the decoy arms and the curated-artefact labels
-# (typer.labels / typer.labelled_gmt), then freeze and register this whole file with the mpaudit commit
-# BEFORE running on real data.
-# The rule P1-GO v1.2 reads the decision thresholds AND settings outside the decision block (min_jaccard, seed,
-# decoy.enabled/n/method/n_depth_bins/min_kappa/n_null_floor, tme.spillover_adjust/rho_sensitivity/
-# null_match/n_null/min_cells/n_markers/min_marker_fold, protocol.kappa_min_effect/kappa_active/min_pairs/
+# Example P1 configuration for a 3CA-style cohort (adapt column names to your AnnData). A TEMPLATE: as shipped it
+# is refused, because the ref/ cytoband and GTF files below are not in the repository and typer.labels /
+# typer.labelled_gmt are empty. Copy it, fill in the `decision` block (pre-declared lists), the decoy arms, the
+# reference files and the curated-artefact labels, then freeze and register the whole file with the mpaudit commit
+# BEFORE running on real data:
+#   mpaudit p1 cohort.h5ad --config my_config.yaml --out results/p1 --n-jobs 8
+# The rule P1-GO v1.3 reads the decision thresholds AND settings outside the decision block (min_jaccard, seed,
+# gavish.seed, decoy.enabled/n/method/n_depth_bins/min_kappa/n_null_floor, tme.spillover_adjust/rho_sensitivity/
+# null_match/n_null/min_cells/n_markers/min_marker_fold, protocol.kappa_min_effect/min_pairs/
 # n_null_sets, positional.enabled). The values below are the registered ones; mpaudit refuses any other value
-# (larger null sizes too: they re-draw the random sets) unless unregistered_variant is true, and then labels the
-# verdict "P1-GO v1.2 (unregistered variant: ...)". It also refuses a config in which an exclusion of the rule
-# cannot run: mps: rederive without typer.labels and typer.labelled_gmt, no decoy arm in decision.dosage_arms,
-# or the positional axis without a cytoband or gene positions.
-# What mpaudit does not compare (arm contents, pre-declared lists, label files, gavish, tme.covariates, keys,
-# protocol names, tme/protocol enabled) is registered by freezing this file; compare run_config.json with it.
-# The whole file is checked before any NMF runs (unknown or pre-v1.0 decision keys, decoy arms not named in
-# the rule, arm columns missing from obs or with NaN in malignant cells, names that cannot match re-derived
-# MPs, missing files, deviations from the registered rule): `mpaudit p1` stops with the reason.
+# (larger null sizes too: another size moves the estimated null quantile or background) unless unregistered_variant
+# is true, and labels the verdict "P1-GO v1.3 (unregistered variant: ...)". protocol.kappa_active is informational
+# and not registered; the constants fixed in code (mpaudit.report.FIXED_CONSTANTS) are part of the commit.
+# mpaudit also refuses a config in which an exclusion of the rule cannot run: mps: rederive without typer.labels
+# and typer.labelled_gmt, no decoy arm in decision.dosage_arms, or the positional axis without a cytoband or gene
+# positions (or with positions and a cytoband that place no gene on a chromosome arm).
+# What mpaudit does not compare (arm contents, pre-declared lists, label files, gavish other than its seed,
+# counts_layer, tme.covariates, tme.n_boot, keys, positional.chrom_col/start_col, recurrence_key, protocol names,
+# tme/protocol enabled, and every other key) is registered by freezing this file; compare run_config.json and the
+# input-file digests with it.
+# The whole file is checked before any NMF runs (unknown keys, pre-v1.0 decision keys, keys naming no obs column,
+# decoy arms not named in the rule, arm columns missing from obs or with NaN in malignant cells, names that cannot
+# match re-derived MPs, missing files, gene positions or a cytoband that place no gene on a chromosome arm,
+# deviations from the registered rule): `mpaudit p1` stops with the reason.
 # Write floats with a decimal point (1.0e-8, not 1e-8): YAML reads 1e-8 as a string.
 keys:
   sample: sample            # NMF unit (one tumour sample)
@@ -27,9 +33,11 @@ keys:
   cell_type: cell_type      # TME cell types; needed for the TME axis
   protocol: protocol        # e.g. fresh / fixed / nuclei; needed for the protocol axis
   clone: clone              # optional: CNA clone labels (Numbat/CopyKAT)
-  doublet: doublet_score    # optional: scDblFinder score
+  doublet: doublet_score    # optional: scDblFinder score (informational typer only)
   intronic: intronic_fraction  # optional: per-cell intronic/unspliced fraction (STARsolo/velocyto on raw reads;
-                               # 3CA matrices carry no intronic/unspliced counts)
+                               # 3CA matrices carry no intronic/unspliced counts; informational typer only)
+                               # clone, doublet and intronic naming no obs column are warned about and ignored;
+                               # any other key naming no obs column is refused
 counts_layer: counts        # raw integer UMI counts (null = adata.X)
 recurrence_key: patient     # a tumour must not "recur" with its own second sample
 mps: rederive               # or a GMT of published MPs, e.g. the Gavish 2023 / 3CA v2 lists. Re-derived MPs are
@@ -39,12 +47,14 @@ cache_dir: nmf_cache        # NMF fits are reused across perturbations and re-ru
 min_jaccard: 0.3            # registered: MP match threshold for decoy hits (criterion a), label carry-over and
                             # instability recovery
 unregistered_variant: false # true runs a config that deviates from the registered rule, labelled as a variant
-seed: 0                     # registered: decoys, random-gene-set nulls and cell subsamples
+seed: 0                     # registered: decoys, random-gene-set nulls, cell subsamples, depth thinning and
+                            # bootstrap resamples
 qc:
   add_obs: true             # adds log_umi, log_genes, pct_mito, pct_ribo to obs if missing, and pct_long (% of
                             # counts on genes > 100 kb) when gene lengths exist (positional.gtf or var gene_length)
 
 gavish:                     # 3CA defaults; listed here to make the audited setting explicit
+  seed: 0                   # registered: NMF restarts of the reference run and of every decoy fit
   ranks: [4, 5, 6, 7, 8, 9]
   nrun: 10
   n_universe: 7000
@@ -82,8 +92,9 @@ decoy:
     dosage: [clone]         # CNA clone recruitment types an MP as dosage, not nuisance; the registered rule
                             # needs an arm named in decision.dosage_arms
   n_depth_bins: 1           # registered (depth enters the mean model; depth strata leak real co-expression)
-  min_kappa: 0.02           # registered: kappa_retained uses samples where the MP's kappa exceeds this and the
-  n_null_floor: 20          # q95 of this many matched random gene sets (registered)
+  min_kappa: 0.02           # registered: kappa_retained uses samples where the MP's kappa exceeds the median of
+  n_null_floor: 50          # this many matched random gene sets by more than max(min_kappa, 3 SD of theirs)
+                            # (both registered)
 
 tme:
   enabled: true
@@ -123,10 +134,10 @@ protocol:
                             # (registered; a larger value sends MPs to the narrower random-set null)
   n_null_sets: 100          # otherwise random matched gene sets in the same paired tumours (registered)
   kappa_min_effect: 0.4054651  # log(1.5), registered: a kappa loss must also exceed 1.5-fold to count
-  kappa_active: 0.05        # registered: a paired tumour is tested only where the MP's kappa under the reference
-                            # or the test protocol exceeds max(kappa_active, q95 of the matched random sets' kappa)
+  kappa_active: 0.05        # informational only (not registered, no gate): sets the kappa_active* columns,
+                            # kappa above max(kappa_active, q95 of the matched random sets' kappa)
 
-decision:                   # P1-GO v1.2; registered thresholds shown, pre-declared lists must be filled in
+decision:                   # P1-GO v1.3; registered thresholds shown, pre-declared lists must be filled in
   expected_tme_shared: []   # names of audited MPs expected to co-vary with TME cells while real (e.g. IFN/MHC-II,
                             # hypoxia); only with mps: <GMT> (names of re-derived MPs are not known in advance)
   expected_tme_shared_gmt: null   # gene sets; an MP overlapping one by >= min_overlap genes is excluded from (b)

@@ -1,12 +1,12 @@
-"""The frozen P1 GO rule (P1-GO v1.2) on synthetic audit tables, its registered settings and the summary."""
+"""The frozen P1 GO rule (P1-GO v1.3) on synthetic audit tables, its registered settings and the summary."""
 import numpy as np
 import pandas as pd
 import pytest
 
 from mpaudit.data import write_gmt
 from mpaudit.pipeline import merge_config
-from mpaudit.report import (REGISTERED_DECISION_KEYS, REGISTERED_SETTINGS, RULE_VERSION, decide, rule_deviations,
-                            rule_label, rule_text, validate_rule, write_summary)
+from mpaudit.report import (FIXED_CONSTANTS, REGISTERED_DECISION_KEYS, REGISTERED_SETTINGS, RULE_VERSION, decide,
+                            rule_deviations, rule_label, rule_settings, rule_text, validate_rule, write_summary)
 
 GENES = [f"G{i}" for i in range(400)]
 MPS = {f"MP{i}": GENES[50 * i:50 * (i + 1)] for i in range(6)}
@@ -280,47 +280,92 @@ def test_summary_lists_counted_mps_and_notes_truncated_tables(tmp_path):
     assert rule_text({}) in text
 
 
+def test_summary_notes_the_gain_mirror_and_undefined_kappa_retained(tmp_path):
+    """Informational: the MPs meeting the gain mirror of (c) and those whose kappa_retained is undefined (no
+    sample entered) in an arm of the rule; neither changes the verdict."""
+    t = tables()
+    t["protocol_shift"]["frac_gain_beyond_null_kappa"] = [0.5, 0.25, 0.0, 0.0, 0.0, 0.0]
+    dec = t["decoy_recruitment"]
+    dec["kappa_retained_n_samples"] = 4
+    dec.loc[(dec["mp"] == "MP2") & (dec["arm"] == "technical"), ["kappa_retained", "kappa_retained_n_samples"]] = \
+        [np.nan, 0]
+    d, flags = decide(MPS, t)
+    assert d["verdict"] == "PIVOT" and d["n_counted"] == 0
+    assert d["gain_mirror_mps"] == ["MP0"] and flags["info_gain_mirror_c"].tolist() == [True] + [False] * 5
+    assert d["kappa_retained_undefined"] == ["MP2 (technical)"]
+    f = flags.set_index("mp")
+    assert f.loc["MP2", "tech_kappa_retained_n_samples"] == 0 and f.loc["MP1", "dosage_kappa_retained_n_samples"] == 4
+    write_summary(tmp_path / "summary.md", d, flags, t, {"decision": {}})
+    text = (tmp_path / "summary.md").read_text()
+    assert "Gain mirror of criterion (c)" in text and "1 MP(s): MP0." in text
+    assert "kappa_retained undefined" in text and "MP2 (technical)." in text
+    # a decoy table without the n_samples column (written before it existed) still works
+    d2, flags2 = decide(MPS, tables())
+    assert flags2["tech_kappa_retained_n_samples"].isna().all() and d2["kappa_retained_undefined"] == []
+
+
 def test_rule_text_follows_the_settings():
     text = rule_text({"min_hits": 3, "min_decoys": 6, "dosage_arms": ["clone"], "a1_null": "null_q95"},
-                     kappa_min_effect=float(np.log(2)), rho_sensitivity=2.0, min_pairs=5, kappa_active=0.1,
-                     min_jaccard=0.4)
+                     kappa_min_effect=float(np.log(2)), rho_sensitivity=2.0, min_pairs=5, n_null_sets=200,
+                     min_kappa=0.05, n_null_floor=60, min_jaccard=0.4)
     for part in ["recruits the MP (a decoy MP at Jaccard >= 0.4 to it) in >= 3 of its 5 decoys (>= 6 needed)",
                  "dosage decoy arm (clone) with >= 3 hits", "random-gene-set null_q95", "multiplied by 2",
                  "partial_r2_rho > null_q95_rho", "by more than 0.693 in log kappa (a 2-fold loss)",
-                 "whatever the number of decoys", "replicate pairs of >= 5 distinct tumours", "above max(0.1, "]:
+                 "whatever the number of decoys", "replicate pairs from >= 5 distinct tumours",
+                 "(200 drawn per tumour and MP",
+                 "bg the median kappa of 60 random gene sets", "kappa_real - bg_real > max(0.05, 3 SD"]:
         assert part in text
     # neither the decision-block thresholds nor the settings given here are the registered ones: the text says so
     assert text.startswith(f"Rule {RULE_VERSION} (unregistered variant: decision.min_decoys=6, decision.min_hits=3, "
-                           "decision.a1_null='null_q95', min_jaccard=0.4, tme.rho_sensitivity=2, "
-                           "protocol.kappa_min_effect=0.693147, protocol.kappa_active=0.1, protocol.min_pairs=5):")
+                           "decision.a1_null='null_q95', min_jaccard=0.4, decoy.min_kappa=0.05, "
+                           "decoy.n_null_floor=60, tme.rho_sensitivity=2, protocol.kappa_min_effect=0.693147, "
+                           "protocol.min_pairs=5, protocol.n_null_sets=200):")
     assert "This is NOT the registered rule" in text
     off = rule_text({}, rho_sensitivity=None)
     assert "re-run is off, so the estimated rho_hat alone decides" in off
     assert off.startswith(f"Rule {RULE_VERSION} (unregistered variant: tme.rho_sensitivity=None):")
     no_margin = rule_text({}, kappa_min_effect=0.0)
-    assert "below the null bound (no minimum effect)." in no_margin
-    assert "NOT the registered rule P1-GO v1.2; deviations: protocol.kappa_min_effect = 0 (registered: 0.405465 " \
+    assert "below the null bound, below the self bound (no minimum effect)." in no_margin
+    assert "NOT the registered rule P1-GO v1.3; deviations: protocol.kappa_min_effect = 0 (registered: 0.405465 " \
            "(log 1.5))." in no_margin
+    # rule_settings reads what rule_text states from a config; protocol.kappa_active is not among them
+    assert rule_settings({}) == {"n_decoys": 5, "min_kappa": 0.02, "n_null_floor": 50, "kappa_min_effect": np.log(1.5),
+                                 "rho_sensitivity": 1.5, "min_pairs": 3, "n_null_sets": 100, "min_jaccard": 0.3}
+    assert rule_text({}, **rule_settings({"protocol": {"kappa_active": 0.2}})) == rule_text({})
     # settings stated by the caller and passed as deviations as well are listed once, in the caller's order
     devs = [("decoy.n", 3, "5"), ("tme.n_null", 40, "500")]
     assert rule_text({}, n_decoys=3, deviations=devs).startswith(
         f"Rule {RULE_VERSION} (unregistered variant: decoy.n=3, tme.n_null=40):")
 
 
-def test_rule_text_states_nulls_gate_jaccard_power_and_informational_items():
+def test_rule_text_states_nulls_self_bound_jaccard_power_and_informational_items():
     text = rule_text({})
     assert text.startswith(f"Rule {RULE_VERSION}: GO if >= 3 retained") and "NOT the registered" not in text
+    assert "activity gate" in text and "Active:" not in text and "where the MP is active" not in text
     for part in ["(a decoy MP at Jaccard >= 0.3 to it)",
                  "which also holds with every rho_hat multiplied by 1.5",
-                 "in >= 0.5 of >= 4 paired tumours where the MP is active",
-                 "and by more than 0.405 in log kappa (a 1.5-fold loss)",
-                 "one-sided 95% t prediction bound from same-protocol replicate pairs of >= 3 distinct tumours, "
-                 "otherwise matched random gene sets carried to the MP's kappa level on the linear scale",
-                 "above max(0.05, the q95 of the matched random gene sets' kappa in the same samples)",
-                 "Active: the MP's kappa under the reference or the test protocol (mean over the tumour's samples "
-                 "under it) is above max(0.05, the q95",
-                 "a replicate pair enters the null only where the MP is active in at least one piece",
+                 "in >= 0.5 of >= 4 tested paired tumours",
+                 "below the null bound, below the self bound and by more than 0.405 in log kappa (a 1.5-fold loss)",
+                 "Every paired tumour with a defined change, null bound and self bound is tested (no activity gate)",
+                 "every sample of a tumour is scored on the same number of cells (the tumour's smallest sample, at "
+                 "most 2000), their counts binomially thinned to the tumour's lowest median count per cell",
+                 "Kappa is that of the MP's genes in the tumour's panel (detected in >= 5% of its malignant cells "
+                 "under each protocol; undefined with fewer than 5 panel genes or less than 0.5 of the MP's genes in "
+                 "the panel), in samples of >= 20 malignant cells",
+                 "with same-protocol replicate pairs from >= 3 distinct tumours, the lower of two one-sided 95% t "
+                 "prediction bounds, on the linear kappa changes (carried to the MP's kappa level) and on the log "
+                 "kappa changes",
+                 "otherwise the k-th smallest linear kappa change, k = floor(0.05 (n + 1)), of the n >= 20 random gene "
+                 "sets with a defined change (100 drawn per tumour and MP",
+                 "a tumour whose k-th smallest change is not below its k-th largest not being tested",
+                 "The self bound is -1.645 times the bootstrap SE (50 resamples of each sample's cells, drawn per "
+                 "seed, sample and MP) of the MP's own linear kappa change, carried to its kappa level; a tumour with "
+                 "an undefined SE is not tested",
                  "in >= 2 of its 5 decoys (>= 5 needed) with kappa_retained >= 0.5",
+                 "per malignant sample of >= 20 cells, on the MP's genes detected in >= 5% of its cells (at least 5), "
+                 "(kappa_decoy - bg_decoy) / (kappa_real - bg_real), bg the median kappa of 50 random gene sets "
+                 "matched on mean expression and detection",
+                 "kappa_real - bg_real > max(0.02, 3 SD of the sets' kappa) with >= 20 sets of finite kappa",
                  "for MPs not pre-declared as expected TME-shared (named, or overlapping a pre-declared gene set by "
                  ">= 10 genes)",
                  "dosage MPs (arm enrichment q, known positional gene clusters excluded, < 0.05, or a dosage decoy "
@@ -328,17 +373,52 @@ def test_rule_text_states_nulls_gate_jaccard_power_and_informational_items():
                  "Curated artefacts (labelled, or carried onto re-derived MPs at Jaccard >= 0.3) are not counted",
                  "(a) >= 5 decoys in some technical arm",
                  "(b) for some MP, >= 10 samples with TME cells, a finite null and the spillover adjusted",
-                 "(c) for some MP, >= 4 paired tumours where it is active and its kappa change and null bound are "
-                 "defined",
+                 "(c) for some MP, >= 4 tested paired tumours.",
                  "Instability, positional flags outside the dosage rule, the within-sample kappa ratio "
-                 "(kappa_ratio_median, not spillover-adjusted), A4 intensity and prevalence and the trivial typer "
-                 "are informational"]:
+                 "(kappa_ratio_median, not spillover-adjusted), the kappa activity columns, A4 intensity and "
+                 "prevalence and the trivial typer are informational"]:
         assert part in text, part
+
+
+def test_fixed_constants_of_the_rule():
+    """The constants fixed in code that P1-GO v1.3 states (a change is a new rule version), and the functions that
+    apply them take them as their defaults (the pipeline passes none of these arguments)."""
+    assert dict(FIXED_CONSTANTS) == {"protocol.KAPPA_FLOOR": 0.01, "protocol.NULL_ALPHA": 0.05,
+                                     "protocol.MIN_RANDOM_SETS": 20, "protocol.KAPPA_BOOT": 50,
+                                     "protocol.KAPPA_SELF_Z": 1.645, "protocol.MAX_KAPPA_CELLS": 2000,
+                                     "protocol.MIN_CELLS": 20, "protocol.MIN_DETECT": 0.05, "protocol.MIN_IOTA": 0.5,
+                                     "protocol.MIN_GENES": 5, "decoy.EXCESS_ENTRY_SD": 3.0,
+                                     "decoy.MIN_FLOOR_SETS": 20, "decoy.MIN_CELLS": 20, "decoy.MIN_DETECT": 0.05,
+                                     "decoy.MIN_GENES": 5}
+    import inspect
+
+    import mpaudit.decoy
+    import mpaudit.protocol
+    for name, value in FIXED_CONSTANTS:
+        module, attr = name.split(".")
+        assert getattr({"protocol": mpaudit.protocol, "decoy": mpaudit.decoy}[module], attr) == value
+
+    def defaults(fn):
+        return {k: v.default for k, v in inspect.signature(fn).parameters.items()}
+    for fn in (mpaudit.protocol.protocol_shift_kappa, mpaudit.protocol.per_sample_kappa):
+        d = defaults(fn)
+        assert (d["max_cells"], d["min_cells"], d["min_detect"], d["min_iota"], d["min_genes"]) == (2000, 20, 0.05, 0.5,
+                                                                                                  5)
+    assert defaults(mpaudit.protocol.protocol_shift_kappa)["n_null_sets"] == dict(REGISTERED_SETTINGS)[
+        "protocol.n_null_sets"]
+    d = defaults(mpaudit.decoy.kappa_retained)
+    assert (d["min_cells"], d["min_detect"], d["min_genes"], d["n_null_floor"]) == (20, 0.05, 5, 50)
+    assert defaults(mpaudit.decoy.decoy_recruitment)["min_cells"] == 20
+    src = inspect.getsource(mpaudit.decoy.decoy_recruitment)
+    assert "min_detect=MIN_DETECT, min_genes=MIN_GENES" in src  # passed to _reference_kappa
+    registered = dict(REGISTERED_SETTINGS)
+    assert registered["decoy.n_null_floor"] == 50 and registered["decoy.min_kappa"] == 0.02
+    assert "protocol.kappa_active" not in registered  # informational only in v1.3
 
 
 def test_decide_labels_deviations_from_the_registered_rule():
     d, _ = decide(MPS, tables())
-    assert d["rule_version"] == RULE_VERSION == "P1-GO v1.2"
+    assert d["rule_version"] == RULE_VERSION == "P1-GO v1.3"
     assert d["registered_rule"] and d["deviations"] == []
     # arm names and pre-declared lists are filled in by the user, not registered
     d, _ = decide(MPS, tables(), {"dosage_arms": ["dosage", "cna"], "expected_tme_shared": ["MP0"],
@@ -347,7 +427,7 @@ def test_decide_labels_deviations_from_the_registered_rule():
     # a decision threshold is found by decide itself; settings outside the block come from the caller
     d, _ = decide(MPS, tables(), {"a1_null": "null_q95"},
                   deviations=[("decision.a1_null", "null_q95", "'null_q99'"), ("tme.rho_sensitivity", None, "1.5")])
-    assert d["rule_version"] == ("P1-GO v1.2 (unregistered variant: decision.a1_null='null_q95', "
+    assert d["rule_version"] == ("P1-GO v1.3 (unregistered variant: decision.a1_null='null_q95', "
                                  "tme.rho_sensitivity=None)")
     assert not d["registered_rule"]
     assert d["deviations"] == [{"setting": "decision.a1_null", "value": "null_q95", "registered": "'null_q99'"},
@@ -358,11 +438,11 @@ def test_decide_labels_deviations_from_the_registered_rule():
 def test_rule_deviations_cover_every_registered_setting():
     assert rule_deviations(merge_config({})) == []
     assert rule_deviations({"decision": {}}) == []   # settings missing from the config count as registered
-    deviating = {"min_jaccard": 0.5, "seed": 1, "decoy.enabled": False, "decoy.n": 10, "decoy.method": "permute",
-                 "decoy.n_depth_bins": 3, "decoy.min_kappa": 0.05, "decoy.n_null_floor": 0,
+    deviating = {"min_jaccard": 0.5, "seed": 1, "gavish.seed": 1, "decoy.enabled": False, "decoy.n": 10,
+                 "decoy.method": "permute", "decoy.n_depth_bins": 3, "decoy.min_kappa": 0.05, "decoy.n_null_floor": 20,
                  "tme.spillover_adjust": False, "tme.rho_sensitivity": None, "tme.null_match": "expression",
                  "tme.n_null": 499, "tme.min_cells": 10, "tme.n_markers": 30, "tme.min_marker_fold": 4.0,
-                 "protocol.kappa_min_effect": 0.0, "protocol.kappa_active": 0.1, "protocol.min_pairs": 2,
+                 "protocol.kappa_min_effect": 0.0, "protocol.min_pairs": 2,
                  "protocol.n_null_sets": 50, "positional.enabled": False}
     assert set(deviating) == {s for s, _ in REGISTERED_SETTINGS}
     for setting, value in deviating.items():
@@ -374,11 +454,14 @@ def test_rule_deviations_cover_every_registered_setting():
                                                                     "min_kappa_retained") else 7
         assert [d[:2] for d in rule_deviations(merge_config({"decision": {key: value}}))] == [(f"decision.{key}",
                                                                                              value)]
-    # larger values deviate too: more null sets re-draw the random sets, and more replicate tumours send an MP to
+    # larger values deviate too: another null size moves the estimated null quantile or background (and for the
+    # protocol null, whose sets share one stream, re-draws the later sets), and more replicate tumours send an MP to
     # the narrower random-set null; the log 1.5 margin as written in the example config (7 decimals) is registered
     assert rule_deviations(merge_config({"protocol": {"kappa_min_effect": 0.4054651}})) == []
+    # protocol.kappa_active is informational in v1.3 (no gate): any value is registered
+    assert rule_deviations(merge_config({"protocol": {"kappa_active": 0.2}})) == []
     larger = merge_config({"tme": {"n_null": 1000}, "protocol": {"min_pairs": 4, "n_null_sets": 200},
-                           "decoy": {"n_null_floor": 50}})
+                           "decoy": {"n_null_floor": 100}})
     assert [d[0] for d in rule_deviations(larger)] == ["decoy.n_null_floor", "tme.n_null", "protocol.min_pairs",
                                                        "protocol.n_null_sets"]
     shown = dict((s, (v, r)) for s, v, r in rule_deviations(merge_config({"tme": {"n_null": 40},
@@ -398,11 +481,11 @@ def test_summary_of_an_unregistered_variant_without_labels(tmp_path):
                 "decoys": {"n_runs": 10, "n_fits": 600, "n_capped_fits": 5, "n_failed_fits": 1}, "instability": None}
     write_summary(tmp_path / "summary.md", d, flags, {}, cfg, nmf_fits=nmf_fits)
     text = (tmp_path / "summary.md").read_text()
-    assert text.startswith("# P1 audit summary\n\n**This verdict is NOT the registered rule P1-GO v1.2: the run is an "
+    assert text.startswith("# P1 audit summary\n\n**This verdict is NOT the registered rule P1-GO v1.3: the run is an "
                            "unregistered variant (unregistered_variant: true). Deviations: tme.rho_sensitivity = None "
                            "(registered: 1.5); protocol.min_pairs = 1 (registered: 3).**")
-    assert ("(P1-GO v1.2 (unregistered variant: tme.rho_sensitivity=None, protocol.min_pairs=1))" in text
-            and "replicate pairs of >= 1 distinct tumours" in text and "re-run is off" in text)
+    assert ("(P1-GO v1.3 (unregistered variant: tme.rho_sensitivity=None, protocol.min_pairs=1))" in text
+            and "replicate pairs from >= 1 distinct tumours" in text and "re-run is off" in text)
     assert "Curated artefacts: not labelled (typer.labels not given; no MP excluded)." in text
     assert ("NMF fits stopped at max_iter (of all fits) / by the restart limit: reference 2/60, 0; decoy runs (10) "
             "5/600, 1." in text)

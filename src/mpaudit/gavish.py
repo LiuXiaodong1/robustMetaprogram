@@ -79,14 +79,20 @@ and renozao/NMF (``R/algorithms-snmf.R``). Remaining differences:
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import inspect
 import math
+import os
 import pickle
+import sys
+import tempfile
+import textwrap
+import warnings
 import zlib
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -377,67 +383,114 @@ def _fit_job(args):
     return sample, universe, out, fits
 
 
-# Layout of a cached value, the (universe, W, fit summary) tuple NMFCache stores; bump it whenever
-# that layout or the meaning of its fields changes without a change to the sources code_version()
-# hashes. Part of code_version().
-CACHE_FORMAT = 2
+# Layout of a cached value, the (universe, W, fit summary) tuple NMFCache stores, and of the input
+# fingerprint (:func:`_fingerprint`); bump it whenever either changes without a change to the
+# sources code_version() hashes. Part of code_version(). 3: the fingerprint hashes the count matrix
+# itself, not its total.
+CACHE_FORMAT = 3
 
-# Hash of the code that determines a cached fit; part of every NMFCache key. Computed on first use
-# (the package version is defined after this module is imported); tests may monkeypatch it.
+# Hash of the code that determines a cached fit; part of every NMFCache key. Set when the package is
+# imported (mpaudit/__init__.py calls code_version(decoy_data=True)), so it describes the sources
+# the running process imported, not files edited later; computed on first use if unset (tests reset
+# it to None).
 CODE_VERSION: str | None = None
 # Hash of the code that generates decoy counts, added to the key of fits on decoy data (data tags
-# starting with DECOY_TAG, as mpaudit.decoy builds them). Computed on first use, like CODE_VERSION.
+# starting with DECOY_TAG, as mpaudit.decoy builds them). Set at import, like CODE_VERSION.
 DECOY_CODE_VERSION: str | None = None
 DECOY_TAG = "decoy-"
+# The functions behind a fit on real data, besides the whole of mpaudit.nmf: _fit_job and everything
+# of mpaudit it calls (tests/test_port_fixes.py checks this list against the calls).
+REAL_SOURCES = ("gavish._fit_job", "gavish.prepare_matrix", "gavish._universe_index", "gavish._fit_summary",
+                "gavish._rank_seeds", "data.log2_cpm10")
 # The functions that turn a cohort into decoy counts: make_decoy and everything of mpaudit it calls.
 DECOY_SOURCES = ("decoy.make_decoy", "decoy._is_continuous", "decoy._covariates", "decoy._strata",
                  "decoy._permute_within", "decoy._scrp_block", "decoy._glm_mean", "decoy._nb_dispersion",
                  "data.get_counts", "data.malignant_mask")
 
 
+def _code_text(obj) -> str:
+    """The code of a module or function as text that changes with the code only: its syntax tree
+    (``ast.dump``) with every docstring removed, so docstrings, comments and layout do not enter
+    it."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(obj)))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                    and isinstance(first.value.value, str):
+                node.body = node.body[1:] or [ast.Pass()]
+    return ast.dump(tree)
+
+
+def _sources(names: tuple[str, ...]) -> list[str]:
+    from . import data, decoy
+    modules = {"data": data, "decoy": decoy, "gavish": sys.modules[__name__]}
+    return [_code_text(getattr(modules[m], f)) for m, f in (s.split(".") for s in names)]
+
+
 def code_version(decoy_data: bool = False) -> str:
     """Hash of the code behind a cached fit.
 
-    For fits on real data: the package version, :data:`CACHE_FORMAT` and the sources that shape a
-    cached fit, i.e. :mod:`mpaudit.nmf`, :func:`prepare_matrix` (with :func:`_universe_index`),
-    :func:`_fit_job`, :func:`_fit_summary` (the cached fit diagnostics), :func:`_rank_seeds` and
-    :func:`mpaudit.data.log2_cpm10`. With ``decoy_data``, also the functions that generate the
-    decoy counts (:data:`DECOY_SOURCES`: :func:`mpaudit.decoy.make_decoy` and every helper of the
-    package it calls; their docstrings included). Editing any of them invalidates an on-disk cache
-    instead of silently serving old fits or old diagnostics. Editing anything else in
-    :mod:`mpaudit.decoy` (its module docstring, :func:`~mpaudit.decoy.decoy_recruitment`,
+    For fits on real data: the package version, :data:`CACHE_FORMAT`, the Python version (the
+    syntax tree's text can differ between versions) and the code of :mod:`mpaudit.nmf` and of
+    :data:`REAL_SOURCES` (:func:`_fit_job` and every function of the package it calls:
+    :func:`prepare_matrix` with :func:`_universe_index`, :func:`_fit_summary` (the cached fit
+    diagnostics), :func:`_rank_seeds` and :func:`mpaudit.data.log2_cpm10`). With ``decoy_data``,
+    also the code of the functions that generate the decoy counts (:data:`DECOY_SOURCES`:
+    :func:`mpaudit.decoy.make_decoy` and every helper of the package it calls). Editing the code of
+    any of them invalidates an on-disk cache instead of silently serving old fits or old
+    diagnostics; editing their docstrings or comments does not (:func:`_code_text`). Editing
+    anything else in :mod:`mpaudit.decoy` (:func:`~mpaudit.decoy.decoy_recruitment`,
     ``kappa_retained``) leaves every key unchanged, and editing the decoy generator leaves the keys
     of fits on real data unchanged.
+
+    The hashes are taken from the sources when the package is imported and kept for the process
+    (:data:`CODE_VERSION`, :data:`DECOY_CODE_VERSION`), so editing a file during a run does not
+    file the running code's fits under the edited code's key. ``run_config.json`` records them.
     """
     global CODE_VERSION, DECOY_CODE_VERSION
     if CODE_VERSION is None:
-        from . import __version__, data, nmf
-        sources = [__version__, f"cache-format-{CACHE_FORMAT}", inspect.getsource(nmf),
-                   inspect.getsource(prepare_matrix), inspect.getsource(_universe_index),
-                   inspect.getsource(_fit_job), inspect.getsource(_fit_summary), inspect.getsource(_rank_seeds),
-                   inspect.getsource(data.log2_cpm10)]
+        from . import __version__, nmf
+        sources = [__version__, f"cache-format-{CACHE_FORMAT}", f"python-{sys.version_info[0]}.{sys.version_info[1]}",
+                   _code_text(nmf), *_sources(REAL_SOURCES)]
         CODE_VERSION = hashlib.sha1("\x1e".join(sources).encode()).hexdigest()[:16]
     if not decoy_data:
         return CODE_VERSION
     if DECOY_CODE_VERSION is None:
-        from . import data, decoy
-        modules = {"data": data, "decoy": decoy}
-        sources = [inspect.getsource(getattr(modules[m], f)) for m, f in (s.split(".") for s in DECOY_SOURCES)]
-        DECOY_CODE_VERSION = hashlib.sha1("\x1e".join(sources).encode()).hexdigest()[:16]
+        DECOY_CODE_VERSION = hashlib.sha1("\x1e".join(_sources(DECOY_SOURCES)).encode()).hexdigest()[:16]
     return hashlib.sha1(f"{CODE_VERSION}\x1e{DECOY_CODE_VERSION}".encode()).hexdigest()[:16]
+
+
+def _fingerprint(barcodes: np.ndarray, gene_hash: str, counts_layer: str | None, X: sp.csr_matrix) -> str:
+    """Cache fingerprint of one sample's input: its cell barcodes, the gene names (``gene_hash``),
+    the counts layer and the count matrix itself (dtype, shape and its CSR arrays), so other counts
+    for the same cells are another input even when every total is the same (e.g. TPM-scaled input,
+    or a permuted decoy). The same counts stored differently (unsorted indices, explicit zeros)
+    only miss the cache."""
+    h = hashlib.sha1(("\x1f".join(barcodes) + gene_hash + str(counts_layer)).encode())
+    h.update(f"{X.dtype.str}|{X.shape}".encode())
+    for a in (X.indptr, X.indices, X.data):
+        h.update(np.ascontiguousarray(a).view(np.uint8))  # the arrays' bytes, without a copy
+    return h.hexdigest()[:20]
 
 
 class NMFCache:
     """Caches per-(sample, rank) NMF bases and fit diagnostics, in memory or (when ``directory``
     is set) on disk.
 
-    The key covers everything that changes the fit: the code version (:func:`code_version`; for
-    data tags starting with :data:`DECOY_TAG` it includes the decoy generator), a fingerprint of
-    the input (cell barcodes, gene names, counts layer, total counts), a data tag (real or decoy),
-    the gene universe, centring, solver settings and seed. Threshold, clustering
-    and leave-study-out perturbations therefore reuse fits; a cache directory cannot serve fits
-    from a different dataset or from older code. With a directory, fits are not also kept in
-    memory (atlas-scale runs would not fit).
+    The key covers everything that changes the fit: the code version (:func:`code_version`, taken
+    when the package is imported; for data tags starting with :data:`DECOY_TAG` it includes the
+    decoy generator), a fingerprint of the input (:func:`_fingerprint`: cell barcodes, gene names,
+    counts layer and the count matrix itself), a data tag (real or decoy), the gene universe,
+    centring, solver settings and seed. Threshold, clustering and leave-study-out perturbations
+    therefore reuse fits, and a cache directory does not serve fits of other counts or of other code.
+    With a directory, fits are not also kept in memory (atlas-scale runs would not fit).
+
+    A fit is written to a temporary file in the directory and then renamed onto its key
+    (``os.replace``), so a run killed while writing leaves no truncated entry; an unreadable entry
+    (e.g. written by an older version) warns and counts as missing, and is refitted and replaced.
+    :func:`compute_programs` stores each sample's fits as soon as they finish, so an interrupted run
+    resumes from the samples already fitted.
     """
 
     def __init__(self, directory: str | Path | None = None):
@@ -453,20 +506,36 @@ class NMFCache:
         return hashlib.sha1(repr(parts).encode()).hexdigest()
 
     def get(self, key: str) -> tuple[np.ndarray, np.ndarray, dict] | None:
-        """``(universe, W, fit_summary)`` or None."""
+        """``(universe, W, fit_summary)`` or None (also for an unreadable file, with a warning)."""
         if key in self.mem:
             return self.mem[key]
-        if self.dir and (self.dir / f"{key}.pkl").exists():
-            with open(self.dir / f"{key}.pkl", "rb") as fh:
-                return pickle.load(fh)
+        path = self.dir / f"{key}.pkl" if self.dir else None
+        if path is not None and path.exists():
+            try:
+                with open(path, "rb") as fh:
+                    return pickle.load(fh)
+            except (EOFError, pickle.UnpicklingError, ValueError, OSError, AttributeError, ImportError) as e:
+                warnings.warn(f"NMF cache entry {path} is unreadable ({type(e).__name__}: {e}); refitting it",
+                              RuntimeWarning, stacklevel=2)
         return None
 
     def put(self, key: str, universe: np.ndarray, W: np.ndarray, fit: dict) -> None:
         if not self.dir:
             self.mem[key] = (universe, W, fit)
-        else:
-            with open(self.dir / f"{key}.pkl", "wb") as fh:
+            return
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{key}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as fh:
                 pickle.dump((universe, W, fit), fh, protocol=pickle.HIGHEST_PROTOCOL)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.dir / f"{key}.pkl")
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def _sample_cells(
@@ -555,7 +624,9 @@ def compute_programs(
 
     Samples come back in ``samples`` order, else in order of first appearance in ``adata``
     (the order ``sample_order="input"`` uses). Settings the later MP stage needs are checked
-    first (:func:`check_keys`), so a configuration error fails before any NMF.
+    first (:func:`check_keys`), so a configuration error fails before any NMF. Each sample's fits
+    go into ``cache`` as soon as that sample is fitted (with ``n_jobs > 1``, in the order the
+    samples finish), so an interrupted call keeps the samples already fitted.
     """
     check_keys(keys, params, adata)
     cache = cache or NMFCache()
@@ -570,9 +641,8 @@ def compute_programs(
     fingerprints: dict[str, str] = {}
     jobs = []
     for s, idx in cells.items():
-        fp = hashlib.sha1(("\x1f".join(obs_names[idx]) + gene_hash + str(counts_layer)
-                           + f"{counts[idx].sum():.10g}").encode()).hexdigest()[:20]
-        fingerprints[s] = fp
+        sub = counts[idx]
+        fp = fingerprints[s] = _fingerprint(obs_names[idx], gene_hash, counts_layer, sub)
         sp_obj = SamplePrograms(sample=s, universe=np.array([], dtype=object))
         missing = []
         for r in params.ranks:
@@ -583,21 +653,24 @@ def compute_programs(
                 sp_obj.universe, sp_obj.W[r], sp_obj.fits[r] = hit
         result[s] = sp_obj
         if missing:
-            jobs.append((s, counts[idx], genes, params, tuple(missing), 1 if n_jobs > 1 else None))
+            jobs.append((s, sub, genes, params, tuple(missing), 1 if n_jobs > 1 else None))
 
-    if jobs:
-        if n_jobs > 1:
-            with ProcessPoolExecutor(max_workers=n_jobs) as ex:
-                outputs = list(ex.map(_fit_job, jobs))
-        else:
-            outputs = [_fit_job(j) for j in jobs]
-        for s, universe, Ws, fits in outputs:
-            for r, W in Ws.items():
-                cache.put(NMFCache.key(data_tag, fingerprints[s], s, r, params), universe, W, fits[r])
-                result[s].W[r] = W
-                result[s].fits[r] = fits[r]
-            result[s].universe = universe
-            result[s]._index = None
+    def store(output) -> None:
+        s, universe, Ws, fits = output
+        for r, W in Ws.items():
+            cache.put(NMFCache.key(data_tag, fingerprints[s], s, r, params), universe, W, fits[r])
+            result[s].W[r] = W
+            result[s].fits[r] = fits[r]
+        result[s].universe = universe
+        result[s]._index = None
+
+    if jobs and n_jobs > 1:
+        with ProcessPoolExecutor(max_workers=n_jobs) as ex:
+            for future in as_completed([ex.submit(_fit_job, j) for j in jobs]):
+                store(future.result())
+    else:
+        for j in jobs:
+            store(_fit_job(j))
     return result
 
 

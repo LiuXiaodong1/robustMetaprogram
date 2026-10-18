@@ -15,9 +15,11 @@ standing in for a read-level measurement (STARsolo, velocyto, DropletQC), so lon
 by the technical arm is true by construction. ``--clean`` removes every planted nuisance program and
 the CNA but keeps the confounders: it is the null cohort on which the frozen rule should not say GO.
 
-With estimated covariates the doublet-cycle coupling is weak (``doublet_est`` keeps about 0.01 of
-the cycle program's kappa; tests/test_decoy_arms.py), so the default run hardly exercises the
-``kappa_retained`` >= 0.5 guard of criterion (a). ``--true-doublet`` puts the planted
+On the default cohort the estimated doublet-cycle coupling is weak (seed 0: a ``doublet_est`` arm
+keeps 0.00 of the cycle program's excess kappa, the registered technical arm 0.01; see the
+``mpaudit.decoy`` docstring), so the default run hardly exercises the ``kappa_retained`` >= 0.5
+guard of criterion (a). On the ``--clean`` cohort, without TME ambient RNA, ``doublet_est`` tracks
+cycling more (a ``doublet_est`` arm keeps 0.26). ``--true-doublet`` puts the planted
 ``doublet_score`` (cycling cells score 0.3 higher) into the technical arm instead of
 ``doublet_est``, to run a real program tightly coupled to a covariate through NMF recruitment and
 that guard. Arm contents are registered as filled in but not compared by the code, so all three runs
@@ -26,7 +28,7 @@ planted score is not observable in real data).
 
 The toy has no curated artefacts and no curated labels, and its MPs are re-derived: under the
 registered rule ``mps: rederive`` needs ``typer.labels`` and ``typer.labelled_gmt``, so every run
-here is the unregistered variant ``P1-GO v1.2 (unregistered variant: typer.labels=None)``
+here is the unregistered variant ``P1-GO v1.3 (unregistered variant: typer.labels=None)``
 (``unregistered_variant: true``), with no other deviation.
 
 Every outcome here is true by construction (see mpaudit.sim). The point is to check that the code

@@ -39,7 +39,7 @@ Technical effects:
   fraction: exonic reads plus intronic reads, which these long genes collect at 21 times their
   exonic rate, in proportion to n; ``obs["intronic_fraction"]`` = n plus N(0, 0.03) noise). Both
   use genes outside the other planted sets and the CNA arm. The magnitudes were calibrated so that
-  the standard pipeline can see the axes (below).
+  the standard pipeline can see the axes at seed 0 (below; other seeds were not checked with NMF).
 * ``protocol_capture_bias``: under the fixed protocol every gene's rate is multiplied by a
   per-gene capture efficiency (lognormal(0, 0.4), the same vector in all fixed samples). It moves
   gene-set intensities between protocols but not co-expression.
@@ -61,12 +61,19 @@ reference pipeline at the demo settings (``GavishParams(nrun=10, min_genes_per_c
 by tumour), each axis must put >= 10 of its genes into one robust program in >= 8 of the 16
 samples. ``CYTO_GAMMA`` 2 is the smallest value tried that meets it (1.75: 5 samples); with it,
 ``LONG_K`` 10 does not (6 samples) and 14-24 do. At 2 and 20 the abundance and long-gene axes
-appear in 13 and 11 samples, each forms its own MP, and the planted log2-rate SD is 0.65 and 0.80
+appear in 14 and 12 samples, each forms its own MP, and the planted log2-rate SD is 0.65 and 0.80
 per gene, in the range of the biology programs. The cost is competition for the fixed ranks 4-9:
 robust appearances went from 16, 13, 9 and 10 samples to 16, 13, 7 and 9 for cycle, hypoxia, EMT and
-IFN, from 11 to 8 for contamination and from 8 to 5 for the CNA; stress stayed at 9. Neighbouring
+IFN, from 11 to 8 for contamination and from 8 to 4 for the CNA; stress stayed at 9. Neighbouring
 magnitudes move these counts by 2-3 samples either way; at ``LONG_K`` 14, EMT fell to 6 samples and
-lost its MP. All counts are toy results at seed 0. Resulting magnitudes (malignant cells, medians
+lost its MP. All counts are toy results at seed 0. The counts at 2 and 20 come from a fresh
+reference run of the demo (``scripts/demo_sim.py``) at commit edb2736, whose NMF and simulator are
+unchanged since. The calibration screen itself had reported 13, 11 and 5 there, because the NMF
+cache of that time keyed a sample's fits on its total count only, and T08_fresh_R1 has the same
+total at the first and the calibrated magnitudes, so it was served its first-magnitude fits (the
+key now hashes the count matrix itself). Of the other screens, only ``LONG_K`` 17 had such a
+collision (T04_fixed_R1 was served the ``LONG_K`` 10 fits); the counts quoted for 1.75 and for
+``LONG_K`` 10 and 14 come from fresh fits. Resulting magnitudes (malignant cells, medians
 over samples): %ribo p5-p95 10-42% within a sample, SD of log %ribo 0.45 (previously 16-35% and
 0.24); within-sample Spearman of the abundance score (mean log expression of its non-ribosomal
 genes) with %ribo 0.90, against 0.68-0.77 in the user-reported breast cancer snRNA-seq cohort
@@ -75,12 +82,15 @@ long-gene rate p95/p5 within a sample 5.7 (previously 1.9), the long genes' shar
 (previously 1.6%), and Spearman of that share with ``intronic_fraction`` 0.84. Side effect: with a
 third of the library on one factor, every other gene is diluted by the same per-cell factor, so
 after total-count normalisation all genes co-vary a little: the latent correlation (``kappa``) of
-random 30-gene sets of unplanted genes in malignant cells is about 0.23 (0.09 before; medians over
-samples), more in cohorts with fewer genes. Seed-0 numbers derived from the default cohort before
-the calibration (e.g. in tests and docstrings of other modules) changed with it. Mechanism tests of
-other axes that should not depend on the technical axes (the TME spillover tests and the protocol
-activity-gate test) build their cohorts at the first magnitudes (:func:`axis_magnitudes` with
-``FIRST_MAGNITUDES``).
+random 30-gene sets of unplanted genes (outside every planted set, private program, TME-enriched,
+lineage, RP and MT gene) detected in >= 5% of a sample's malignant cells is about 0.21 (0.08
+before; median over 40 sets per sample, then over the 16 samples of ``simulate_cohort(seed=0)``;
+0.26 against 0.10 for genes detected in >= 20%), more in cohorts with fewer genes. Seed-0 numbers
+derived from the default cohort before the calibration (e.g. in tests and docstrings of other
+modules) changed with it. Mechanism tests of other axes that should not depend on the technical
+axes (the TME spillover tests and the protocol test of tumours without a program,
+``test_kappa_tested_in_tumours_without_the_program``) build their cohorts at the first magnitudes
+(:func:`axis_magnitudes` with ``FIRST_MAGNITUDES``).
 
 Covariates in ``obs``: ``clone``, ``doublet_score`` and ``contamination`` are TRUE values (the
 planted clone; a score drawn from the true doublet status; the planted ambient fraction plus

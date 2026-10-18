@@ -33,8 +33,9 @@ no TME biology at all. With ``spillover_adjust``:
    ``exclude_genes`` (default: the genes of all audited sets, so no MP calibrates its own leak).
    Ambient RNA caps this ratio: a TME type holding a fraction ``rho`` of malignant RNA expresses
    every malignant gene at least at ``rho`` times its malignant level, so no gene exceeds about
-   ``1 / rho``-fold (toy cohort of 16 fresh samples below, 5% mean ambient: the planted lineage
-   markers reach 11.9-16.2 fold). A TME type averaging ``rho`` above about
+   ``1 / rho``-fold (the 16-fresh-sample cohort of ``tests/test_tme.py``, 100 malignant and 3 x 50
+   TME cells per sample, seed 0, 5% mean ambient: the planted lineage markers reach 11.9-16.2 fold,
+   11.6-15.8 at first magnitudes). A TME type averaging ``rho`` above about
    ``1 / min_marker_fold``, or one that shares the malignant lineage genes (e.g. normal epithelium
    next to a carcinoma), leaves too few markers.
    With fewer than ``MIN_MARKERS`` markers the adjustment is skipped with a warning
@@ -111,18 +112,20 @@ hence the ``rho_sensitivity`` re-run.
 Partial R^2 with ``slope <= 0`` counts as 0, for null sets and for ``null_p`` =
 (1 + #{null >= observed}) / (1 + number of null sets).
 
-**Use in the P1 GO rule** (``P1-GO v1.2`` in :mod:`mpaudit.report`, criterion b): only a positive
+**Use in the P1 GO rule** (``P1-GO v1.3`` in :mod:`mpaudit.report`, criterion b): only a positive
 association (``slope > 0``) with ``partial_r2 > null_q99`` counts, and no fixed R^2 threshold.
 A shared technical or niche-wide factor moves both compartments the same way; a negative
 association has no nuisance reading (competition for reads, over-subtracted spillover). A fixed
 bar is not interpretable: on the default toy cohort (16 samples, 4 under the fixed protocol; seed
-0, 500 sets) the random-set null has q95 0.46-0.78 and q99 0.63-0.86 per audited set, because
-protocol-specific capture and stress genes among the control genes move every set in both
-compartments; with 16 fresh samples and 1,500 genes (seed 0, 200 sets) q95 is 0.19-0.27. q99
-rather than q95 because the rule screens dozens of MPs and the
-random-set null is approximate. IFN response and hypoxia can be genuinely TME-shared biology, so
-MPs on the pre-declared expected-TME-shared list cannot count through this criterion. The rule is
-defined on the spillover-adjusted statistic, i.e. on rows with ``spill_adjusted`` True. The
+0, 500 sets) the random-set null has q95 0.46-0.78 and q99 0.63-0.86 over the nine planted sets,
+because protocol-specific capture and stress genes among the control genes move every set in both
+compartments; on the 16-fresh-sample cohort of ``tests/test_tme.py`` (100 malignant and 3 x 50 TME
+cells per sample, 1,500 genes; seed 0, 200 sets) the nine planted sets give q95 0.18-0.41 and q99
+0.29-0.57 (0.19-0.27 and 0.26-0.48 for the six sets of that test). q99 rather than q95 because the
+rule screens dozens of MPs and the random-set null is approximate. IFN response and hypoxia can be
+genuinely TME-shared biology, so MPs on the pre-declared expected-TME-shared list cannot count
+through this criterion. The rule is defined on the spillover-adjusted statistic, i.e. on rows with
+``spill_adjusted`` True. The
 ``*_rho`` columns test whether an association depends on the size of ``rho_hat``: an MP above
 ``null_q99`` at the estimated ``rho_hat`` that fails ``slope_rho > 0`` and
 ``partial_r2_rho > null_q99_rho`` at the scaled one is consistent with an under-subtracted leak

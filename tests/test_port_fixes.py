@@ -2,6 +2,7 @@
 validation and early key checks, v2 gene order, sample order, Process_mat parity, eligible
 universe, and method variants in the instability axis."""
 import inspect
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -100,8 +101,19 @@ def test_fit_diagnostics_reach_sample_programs_and_result():
 
 # --------------------------------------------------------------------------- cache hits
 
+@pytest.fixture(autouse=True)
+def _restore_code_versions(monkeypatch):
+    """Every test of this file gets back the code versions it found, whatever it sets them to (they are module
+    globals, which monkeypatch restores only if it set them)."""
+    monkeypatch.setattr(gavish, "CODE_VERSION", gavish.CODE_VERSION)
+    monkeypatch.setattr(gavish, "DECOY_CODE_VERSION", gavish.DECOY_CODE_VERSION)
+
+
 def _spy_fit_job(monkeypatch) -> list:
-    """Replace gavish._fit_job by a wrapper recording (sample, ranks) of every fitting job."""
+    """Replace gavish._fit_job by a wrapper recording (sample, ranks) of every fitting job. The code version is
+    pinned first, from the real _fit_job: computed later, it would hash the wrapper."""
+    monkeypatch.setattr(gavish, "CODE_VERSION", None)
+    gavish.code_version()  # hashes the real _fit_job (the autouse fixture restores the global afterwards)
     calls, real = [], gavish._fit_job
     monkeypatch.setattr(gavish, "_fit_job", lambda job: calls.append((job[0], job[4])) or real(job))
     return calls
@@ -144,6 +156,81 @@ def test_disk_cache_hits_skip_fitting(monkeypatch, tmp_path):
     assert len(calls) == 6
 
 
+def test_disk_cache_does_not_serve_other_counts_with_the_same_totals(monkeypatch, tmp_path):
+    """The fingerprint hashes each sample's count matrix, not its total: TPM-scaled input (every cell sums to 1e6)
+    and two genes' counts swapped are other inputs."""
+    adata = toy_adata()
+    p = GavishParams(ranks=(2, 3), nrun=2, max_iter=8, min_genes_per_cell=0, min_cells=10)
+    calls = _spy_fit_job(monkeypatch)
+    X = adata.X.toarray().astype(float)
+    tpm = adata.copy()
+    tpm.X = sp.csr_matrix(X / X.sum(axis=1, keepdims=True) * 1e6)
+    other = tpm.copy()  # another TPM matrix of the same cells: the same totals, other counts
+    Y = np.sqrt(X)
+    other.X = sp.csr_matrix(Y / Y.sum(axis=1, keepdims=True) * 1e6)
+    swapped = adata.copy()
+    swapped.X = sp.csr_matrix(X[:, [1, 0, *range(2, X.shape[1])]])  # per-cell totals unchanged
+    for i, cohort in enumerate((tpm, other, adata, swapped), start=1):
+        compute_programs(cohort, KEYS, p, cache=NMFCache(tmp_path))
+        assert len(calls) == 3 * i  # every sample fitted again
+    compute_programs(swapped.copy(), KEYS, p, cache=NMFCache(tmp_path))  # the same counts: served
+    assert len(calls) == 12 and len(list(tmp_path.glob("*.pkl"))) == 24
+
+
+def test_disk_cache_writes_are_atomic_and_unreadable_entries_are_refitted(monkeypatch, tmp_path):
+    adata = toy_adata()
+    p = GavishParams(ranks=(2, 3), nrun=2, max_iter=8, min_genes_per_cell=0, min_cells=10)
+    calls = _spy_fit_job(monkeypatch)
+    first = compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    files = sorted(tmp_path.glob("*.pkl"))
+    assert len(files) == 6 and not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob(".*"))
+    files[0].write_bytes(files[0].read_bytes()[:40])  # a truncated entry (e.g. a copy cut short)
+    with pytest.warns(RuntimeWarning, match="is unreadable"):
+        back = compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    assert len(calls) == 4 and len(calls[3][1]) == 1  # only that (sample, rank) is refitted
+    assert all(np.array_equal(back[s].W[r], first[s].W[r]) for s in first for r in p.ranks)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the entry was replaced
+        compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    assert len(calls) == 4
+
+
+class _Interrupted(Exception):
+    pass
+
+
+def test_an_interrupted_pass_keeps_the_samples_already_fitted(monkeypatch, tmp_path):
+    adata = toy_adata()
+    p = GavishParams(ranks=(2, 3), nrun=2, max_iter=8, min_genes_per_cell=0, min_cells=10)
+    real, done = gavish._fit_job, []
+
+    def interrupted(job):  # the second sample's fit is interrupted
+        if done:
+            raise _Interrupted
+        done.append(job[0])
+        return real(job)
+
+    monkeypatch.setattr(gavish, "_fit_job", interrupted)
+    with pytest.raises(_Interrupted):
+        compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    assert done == ["s0"] and len(list(tmp_path.glob("*.pkl"))) == 2  # s0's fits at both ranks are kept
+    monkeypatch.setattr(gavish, "_fit_job", real)
+    calls = _spy_fit_job(monkeypatch)
+    compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path))
+    assert calls == [("s1", (2, 3)), ("s2", (2, 3))]  # the run resumes after s0
+
+
+def test_parallel_fits_equal_serial_fits(tmp_path):
+    adata = toy_adata()
+    p = GavishParams(ranks=(2, 3), nrun=2, max_iter=8, min_genes_per_cell=0, min_cells=10)
+    serial = compute_programs(adata, KEYS, p)
+    parallel = compute_programs(adata, KEYS, p, cache=NMFCache(tmp_path), n_jobs=2)
+    assert list(parallel) == list(serial) == ["s0", "s1", "s2"] and len(list(tmp_path.glob("*.pkl"))) == 6
+    for s in serial:
+        assert np.array_equal(parallel[s].universe, serial[s].universe) and parallel[s].fits == serial[s].fits
+        assert all(np.array_equal(parallel[s].W[r], serial[s].W[r]) for r in p.ranks)
+
+
 # --------------------------------------------------------------------------- cache code version
 
 def test_cache_key_includes_code_version(monkeypatch):
@@ -154,28 +241,69 @@ def test_cache_key_includes_code_version(monkeypatch):
     assert NMFCache.key("data", "fp", "s", 4, p) != k0
 
 
-def _edit_source(monkeypatch, target):
-    """Make inspect.getsource report ``target`` as edited, and drop the cached code versions."""
+def _fresh_code_versions(monkeypatch) -> tuple[str, str]:
+    """The code versions computed now from the sources (not the values a test may have left)."""
+    monkeypatch.setattr(gavish, "CODE_VERSION", None)
+    monkeypatch.setattr(gavish, "DECOY_CODE_VERSION", None)
+    return gavish.code_version(), gavish.code_version(decoy_data=True)
+
+
+def _edit_source(monkeypatch, target, edit=lambda src: src + "\n_edited = 1\n"):
+    """Make inspect.getsource report ``target`` as edited (by default, one statement added), and drop the cached
+    code versions."""
     real = inspect.getsource
     monkeypatch.setattr(gavish, "CODE_VERSION", None)
     monkeypatch.setattr(gavish, "DECOY_CODE_VERSION", None)
-    monkeypatch.setattr(inspect, "getsource", lambda obj: real(obj) + ("\n# edit" if obj is target else ""))
+    monkeypatch.setattr(inspect, "getsource", lambda obj: edit(real(obj)) if obj is target else real(obj))
 
 
-@pytest.mark.parametrize("target", [nmf, data.log2_cpm10, prepare_matrix, gavish._fit_job, gavish._fit_summary])
+@pytest.mark.parametrize("target", [nmf, data.log2_cpm10, prepare_matrix, gavish._universe_index, gavish._fit_job,
+                                    gavish._fit_summary, gavish._rank_seeds])
 def test_code_version_covers_fit_sources(monkeypatch, target):
-    v0, d0 = gavish.code_version(), gavish.code_version(decoy_data=True)
+    v0, d0 = _fresh_code_versions(monkeypatch)
     _edit_source(monkeypatch, target)
     assert gavish.code_version() != v0 and gavish.code_version(decoy_data=True) != d0  # decoy fits too
+
+
+def test_code_versions_are_taken_when_the_package_is_imported(monkeypatch):
+    """Set at import from the sources imported; a file edited during the run does not change them."""
+    import subprocess
+    import sys
+
+    code = "import mpaudit.gavish as g; print(g.CODE_VERSION, g.DECOY_CODE_VERSION)"
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
+    assert len(out) == 2 and "None" not in out
+    v0, d0 = gavish.code_version(), gavish.code_version(decoy_data=True)
+    real = inspect.getsource
+    monkeypatch.setattr(inspect, "getsource", lambda obj: real(obj) + "\n_edited = 1\n")  # every file edited
+    assert (gavish.code_version(), gavish.code_version(decoy_data=True)) == (v0, d0)
+    monkeypatch.setattr(inspect, "getsource", real)
+    assert _fresh_code_versions(monkeypatch) == (v0, d0)
 
 
 REAL_TAG, DECOY_TAG = "data", "decoy-residual-clone_est-d1-s1000"
 
 
+@pytest.mark.parametrize("target", [nmf, prepare_matrix, data.log2_cpm10, decoy.make_decoy, decoy._glm_mean])
+def test_docstring_and_comment_edits_change_no_cache_key(monkeypatch, target):
+    p = GavishParams()
+    _fresh_code_versions(monkeypatch)
+    keys0 = [NMFCache.key(tag, "fp", "s", 4, p) for tag in (REAL_TAG, DECOY_TAG)]
+
+    def edit(src):
+        out = src.replace('"""', '"""Edited, with new toy numbers. ', 1) + "\n# a comment\n"
+        assert out.count("Edited") == 1
+        return out
+
+    _edit_source(monkeypatch, target, edit)
+    assert [NMFCache.key(tag, "fp", "s", 4, p) for tag in (REAL_TAG, DECOY_TAG)] == keys0
+
+
 @pytest.mark.parametrize("target", [decoy.decoy_recruitment, decoy.kappa_retained, decoy._reference_kappa, decoy])
 def test_editing_decoy_recruitment_changes_no_cache_key(monkeypatch, target):
-    # e.g. a docstring edit in decoy.py outside the decoy generator: no fit, real or decoy, is refitted
+    # code outside the decoy generator: no fit, real or decoy, is refitted
     p = GavishParams()
+    _fresh_code_versions(monkeypatch)
     keys0 = [NMFCache.key(tag, "fp", "s", 4, p) for tag in (REAL_TAG, DECOY_TAG)]
     _edit_source(monkeypatch, target)
     assert [NMFCache.key(tag, "fp", "s", 4, p) for tag in (REAL_TAG, DECOY_TAG)] == keys0
@@ -185,6 +313,7 @@ def test_editing_decoy_recruitment_changes_no_cache_key(monkeypatch, target):
                                     data.malignant_mask])
 def test_editing_the_decoy_generator_changes_only_decoy_keys(monkeypatch, target):
     p = GavishParams()
+    _fresh_code_versions(monkeypatch)
     real0, decoy0 = NMFCache.key(REAL_TAG, "fp", "s", 4, p), NMFCache.key(DECOY_TAG, "fp", "s", 4, p)
     assert real0 != decoy0 and gavish.code_version(decoy_data=True) != gavish.code_version()
     _edit_source(monkeypatch, target)
@@ -218,8 +347,18 @@ def test_decoy_sources_are_everything_make_decoy_reaches():
     assert hashed == _package_functions_reached(decoy.make_decoy) | {decoy.make_decoy}
 
 
+def test_real_sources_are_everything_fit_job_reaches():
+    """The real-data code version hashes mpaudit.nmf whole and REAL_SOURCES: together, every function of the
+    package that a fit (_fit_job) runs."""
+    modules = {"data": data, "gavish": gavish}
+    hashed = {getattr(modules[m], f) for m, f in (s.split(".") for s in gavish.REAL_SOURCES)}
+    reached = _package_functions_reached(gavish._fit_job) | {gavish._fit_job}
+    assert {f for f in reached if f.__module__ != "mpaudit.nmf"} == hashed
+    assert {f.__module__ for f in reached} == {"mpaudit.gavish", "mpaudit.data", "mpaudit.nmf"}
+
+
 def test_code_version_covers_cache_format(monkeypatch):
-    v0 = gavish.code_version()
+    v0, _ = _fresh_code_versions(monkeypatch)
     monkeypatch.setattr(gavish, "CODE_VERSION", None)
     monkeypatch.setattr(gavish, "CACHE_FORMAT", gavish.CACHE_FORMAT + 1)
     assert gavish.code_version() != v0

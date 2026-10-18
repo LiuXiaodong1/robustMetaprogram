@@ -176,7 +176,8 @@ def test_dissociation_stress_flag_removes_stress_scaling():
     for grp in (mal, ~mal):
         fresh_on, fresh_off = _share(X_on, grp & ~fixed, stress), _share(X_off, grp & ~fixed, stress)
         assert fresh_on > 2 * fresh_off
-        # unscaled: fresh cells now carry about the fixed cells' stress share (capture bias aside)
+        # unscaled: fresh cells now carry about the fixed cells' stress share (capture bias aside). A seed-0
+        # check: over seeds 0-9 the ratio is 0.67-1.24 except in malignant cells at seed 2 (0.665)
         assert 0.67 < fresh_off / _share(X_off, grp & fixed, stress) < 1.5
         assert fresh_on / _share(X_on, grp & fixed, stress) > 2
 
@@ -254,6 +255,12 @@ def test_technical_axes_rival_a_planted_program():
     them met it; the calibrated ones give 0.97 and 1.73. The first magnitudes gave 0.23 and 0.58,
     with neither axis in any NMF program. A guard against the axes slipping back below what NMF can
     see, not a substitute for the NMF check.
+
+    These are seed-0 values (``SMALL``), and the test is a fixed-seed regression guard: the
+    calibration and its NMF check used seed 0 only. At seeds 1-5 this cohort gives abundance 0.86,
+    0.92, 0.85, 1.05, 0.71 and long genes 0.85, 1.29, 1.15, 1.41, 1.11, so the bounds hold at seed 4
+    alone, and of seeds 0-5 seed 0 gives the highest long-gene ratio; whether NMF sees the axes at
+    other seeds is not established.
     """
     adata, truth = _cohort()
     X = _dense(adata)

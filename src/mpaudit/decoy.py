@@ -33,19 +33,44 @@ technical hit is not attributed to a single covariate. To attribute it (e.g. to 
 and list each in ``decision.technical_arms``. Criterion (a) then counts a hit in any of them, which
 adds chances to hit, so fix the arm list in the registered config before running.
 
-**kappa_retained.** A decoy reproduces an MP to the extent that the declared nuisance explains
-the MP's co-expression. Per MP, arm, decoy and malignant sample with >= ``min_cells`` cells, the
-ratio ``kappa_decoy / kappa_real`` of the MP's mean latent correlation
-(:func:`mpaudit.coexpr.kappa`, size factors = total counts; genes detected in >= 5% of the
-sample's cells in the real data, at least 5) is taken; ``kappa_retained`` is its median over the
-samples where the MP is co-expressed, averaged over the arm's decoys (NaN when no sample
-qualifies: a sample where the MP is not co-expressed says nothing about what nuisance explains).
-"Co-expressed" means ``kappa_real`` above both ``min_kappa`` [0.02] and the 95th percentile of
-``n_null_floor`` [20] random gene sets matched on mean expression and detection in that sample
-(:func:`mpaudit.coexpr.matched_random_sets`); with a fixed floor alone, samples where the MP is
-inactive (kappa_real at the random-set level: 0.09-0.24 for EMT and IFN in samples of tumours that
-lack them, on the toy cohort below) would put noise ratios into the median. It is not clipped:
-noise moves single ratios below 0 or above 1, and see below for systematic ratios above 1.
+**kappa_retained** (P1-GO v1.3). A decoy reproduces an MP to the extent that the declared nuisance
+explains the MP's own co-expression, beyond what every gene set of the sample shares. Per MP, arm,
+decoy and malignant sample with >= ``min_cells`` cells (of nonzero total): ``G``, the MP's genes
+detected in >= 5% of the sample's cells in the real data (at least 5); ``kappa_real``, the mean
+latent correlation of ``G`` (:func:`mpaudit.coexpr.kappa`, size factors = total counts); and
+``n_null_floor`` [50] random gene sets drawn from the sample's other eligible genes, matched gene by
+gene to ``G`` on mean expression and detection (:func:`mpaudit.coexpr.matched_random_sets`), from a
+stream of their own per (seed, sample, MP) (:func:`_set_rng`: an MP's sets do not depend on the
+other MPs or samples of the call, or on their order). ``bg_real`` and ``s`` are the median and the SD
+(ddof 1) of the sets' kappa. The sample enters when >= ``MIN_FLOOR_SETS`` [20] sets have a finite
+kappa and ``kappa_real - bg_real > max(min_kappa [0.02], EXCESS_ENTRY_SD [3] x s)``; its ratio is
+``(kappa_decoy - bg_decoy) / (kappa_real - bg_real)``, the same genes' and the same sets' kappa on
+the decoy's counts of the same cells (``bg_decoy``: the median over the sets with a finite kappa).
+``kappa_retained`` is the median ratio over the entering samples, averaged over the arm's decoys;
+NaN when no sample enters, and the MP then can neither meet criterion (a) in that arm nor be typed
+dosage by it. Every kappa of a sample on one count matrix comes from one
+:func:`mpaudit.coexpr.set_kappas` call (the values of :func:`~mpaudit.coexpr.kappa` set by set; on
+the default toy, 8 sets, it halved the time of a ``kappa_retained`` call, 22 s to 11 s on one core).
+It is not clipped: noise moves single ratios below 0 or above 1, and see below for systematic ratios
+above 1.
+
+Why the excess: every gene set of a sample co-varies a little (shared nuisance such as a per-cell
+dilution or ambient RNA), and a decoy keeps that background. v1.2's ratio ``kappa_decoy /
+kappa_real`` credited the decoy with it: under v1.2 the technical arm kept 0.12-0.19 of the cycle,
+hypoxia, EMT and IFN sets' kappa on the default toy (mean of 3 seeds, v1.2 reference of
+``scripts/calibration``), and a decoy that keeps only the background of a hand-built sample has a
+ratio of about 0.4 and an excess ratio of about 0 (``tests/test_decoy_arms.py``).
+Why the 3-SD entry: v1.2's entry (``kappa_real`` above the q95 of 20 random sets) let in samples
+where the MP is absent, which carry the nuisance's background but not the program and have high
+ratios: with EMT kept in 2 carrier tumours plus the 8 tumours without it (minority cohort of
+``scripts/calibration/evaluate_a.py``, seed 2) it reached 0.66 under the technical arm. The 3-SD
+entry keeps the denominator's coefficient of variation at most 1/3, and its residual selection bias
+is downward, which is conservative for (a); reference results with it are in
+``scripts/calibration/README.md``. On the default toy (below) no sample of a tumour without EMT,
+IFN or CNA_7q enters for that set. The price: weakly co-expressed MPs lose entering samples
+(contamination enters in 7 of the 16 samples of that toy) and can become NaN, i.e. unpowered in the
+arm; :func:`decoy_recruitment` reports the entering samples (``kappa_retained_n_samples``) and
+``summary.md`` lists the MPs with none in an arm of the rule.
 
 **Caveat: covariates computed from expression.** Doublet scores, contamination estimates, %ribo,
 ``pct_long``, the intronic fraction and inferred clones are computed from the same counts (the
@@ -55,29 +80,37 @@ and get higher doublet scores, so a doublet arm keeps part of the cycle program,
 cells NMF can find that part in decoys; %ribo tracks translation, ribosome biogenesis and MYC
 activity, so an arm on it keeps such programs, and an MP containing ribosomal-protein genes shares
 counts with %ribo. Recruitment alone would then call real biology nuisance; ``kappa_retained``
-grades how much of the co-expression the covariate explains. On the toy cohort
-(:func:`mpaudit.sim.simulate_cohort`, seed 0, two decoys per arm, median over 16 samples) an arm on
-the planted doublet score (cycling cells score 0.3 higher; within-sample Spearman 0.61 with
-cycling) keeps 0.35-0.38 of the cycle program's kappa, an arm on the expression-based
-``doublet_est`` (Spearman 0.26) about 0.01; ``clone_est`` keeps 0.79-0.82 of the CNA set's kappa and
-``contamination_est`` 1.40-1.42 of the contamination set's. An arm on ``pct_ribo`` keeps 0.88 of the
-abundance set's kappa, and 0.10-0.21 of cycle, hypoxia and CNA, because on the toy %ribo also moves
-every gene through a shared per-cell dilution; the four-covariate technical arm of the demo keeps
-0.12-0.24 of those three. Two limits remain:
+grades how much of the excess co-expression the covariate explains. On the toy cohort
+(:func:`mpaudit.sim.simulate_cohort`, seed 0, 16 samples; decoys with seeds 1000 and 1001,
+``kappa_retained`` seed 1000 as in :func:`decoy_recruitment`, mean of the two decoys; re-run for
+v1.3 on 2026-10-17) an arm on the planted doublet score (cycling cells score 0.3 higher;
+within-sample Spearman 0.61 with cycling) keeps 0.42 of the cycle program's excess, an arm on the
+expression-based ``doublet_est`` (Spearman 0.26 on this cohort) 0.00; ``clone_est`` keeps 1.00 of
+the CNA set's excess. On the null cohort of the same seed (no TME ambient RNA, so
+``contamination_est``, from which ``doublet_est`` is built, tracks cycling), ``doublet_est`` has
+Spearman 0.51 with cycling and its arm keeps 0.26 of cycle's excess (re-run 2026-10-18). Back on
+the default cohort, an arm on ``pct_ribo`` keeps 0.87 of the abundance set's excess, 0.06 of the
+long genes' and between -0.07 and 0.04 of cycle, hypoxia, EMT, IFN and CNA; the four-covariate
+technical arm of the demo keeps 0.88 of abundance, 0.92 of long genes and 1.39 of contamination,
+and between -0.04 and 0.07 of those five biology sets. Two limits remain:
 
 * a real program strongly tied to a covariate's estimator (cell size and the doublet score, a
   transcriptional state that an expression-based clone caller splits on, translation and %ribo)
-  keeps most of its kappa and cannot be told from nuisance here; if the decoys recruit it, it counts
-  as nuisance support under criterion (a). Only covariates measured independently of expression
-  (genotype demultiplexing, cell hashing, protocol twins) settle such cases;
+  keeps most of its co-expression and cannot be told from nuisance here; if the decoys recruit it,
+  it counts as nuisance support under criterion (a) (in ``scripts/calibration``, under the technical
+  arm with the planted doublet score in place of ``doublet_est``, cycle keeps 0.497, 0.532 and 0.530
+  on the default toy at seeds 0, 1 and 2, at the 0.5 guard, and 0.64-0.67 on the null toy, above
+  it). Only covariates measured independently of
+  expression (genotype demultiplexing, cell hashing, protocol twins) settle such cases;
 * a covariate computed from the MP's own genes inflates ``kappa_retained`` above 1: the covariate
   carries those genes' sampling noise as a shared factor, which the decoy turns into
-  co-expression. ``contamination_est`` is the share of counts on TME-specific genes, about half of
-  which form the contamination set (18 of 36 at seed 0); on a seed-3 toy cohort, before the toy's
-  technical axes were recalibrated (2026-10-17), 19 of 35, and recomputed without those genes it
-  kept 0.90 instead of 1.25. ``pct_ribo`` and ``pct_long`` (shares of counts on ribosomal-protein
-  and on long genes, :func:`mpaudit.data.qc_metrics`) do the same for MPs made of those genes.
-  Estimate covariates from genes outside the audited MP where possible.
+  co-expression, and the excess ratio, with a smaller denominator than v1.2's ratio, inflates it
+  further. ``contamination_est`` is the share of counts on TME-specific genes, from which the
+  contamination set is drawn, and ``doublet_est`` is built from it: on the toy above an arm on
+  ``contamination_est`` keeps 1.97 of the contamination set's excess and one on ``doublet_est`` 1.75.
+  ``pct_ribo`` and ``pct_long`` (shares of counts on ribosomal-protein and on long genes,
+  :func:`mpaudit.data.qc_metrics`) do the same for MPs made of those genes. Estimate covariates from
+  genes outside the audited MP where possible.
 
 Strata leak a little real signal: per-stratum gene means carry the stratum's share of every
 program, so decoy co-expression grows roughly with (number of strata / cells per sample). Depth
@@ -91,19 +124,20 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import zlib
 
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from scipy import stats
 
-from .coexpr import kappa, matched_random_sets
+from .coexpr import matched_random_sets, set_kappas
 from .compare import jaccard_matrix
 from .data import Keys, get_counts, malignant_mask, sample_map
 from .gavish import DECOY_TAG, GavishParams, NMFCache, assemble, compute_programs
 
 PER_MP_COLUMNS = ["mp", "arm", "n_decoys", "hits", "recruitment", "mean_best_jaccard", "max_best_jaccard",
-                  "kappa_retained"]
+                  "kappa_retained", "kappa_retained_n_samples"]
 # n_fits: NMF runs behind the decoy cohort's programs (samples x ranks x nrun); n_capped_fits: of which stopped
 # at max_iter; n_failed_fits: of which stopped by the restart limit (see mpaudit.gavish)
 PER_DECOY_COLUMNS = ["arm", "decoy", "n_robust", "n_mps", "n_fits", "n_capped_fits", "n_failed_fits"]
@@ -271,6 +305,12 @@ def make_decoy(
     real counts (with ``method="permute"``, NaN fall into their own bin).
     :func:`mpaudit.pipeline.validate_config` therefore refuses decoy arm columns with NaN in
     malignant cells.
+
+    The draws come from one stream (``seed``) taken over the samples and their cells in the
+    cohort's order, so the same cells in another order give another decoy, a different draw of the
+    same law (the random gene sets of :func:`kappa_retained` and of :mod:`mpaudit.protocol` do not
+    depend on order). A rerun reproduces the decoys only from the same cohort file, whose checksum
+    ``run_config.json`` does not record: keep it with the run's outputs.
     """
     if method not in ("residual", "permute"):
         raise ValueError("method must be 'residual' or 'permute'")
@@ -320,19 +360,39 @@ def make_decoy(
 
 # --------------------------------------------------------------------------- kappa_retained
 
+N_NULL_FLOOR = 50  # matched random gene sets per (sample, set): the background's median and SD (decoy.n_null_floor)
+MIN_FLOOR_SETS = 20  # random sets with a finite kappa needed for a sample to enter
+EXCESS_ENTRY_SD = 3.0  # a sample enters when kappa_real - bg_real > max(min_kappa, EXCESS_ENTRY_SD x SD of the sets)
+MIN_CELLS = 20  # malignant cells (of nonzero total) a sample needs for kappa_retained
+MIN_DETECT = 0.05  # G: the set's genes detected in >= this share of the sample's cells (real data) ...
+MIN_GENES = 5  # ... at least this many of them
+
+
+def _set_rng(seed: int, sample: str, mp: str) -> np.random.Generator:
+    """Random-set stream of one (sample, set), ``default_rng([seed, crc32(sample + '\\x1f' + set)])``: a set's
+    random sets do not depend on the other sets or samples of the call, or on their order."""
+    return np.random.default_rng([int(seed), zlib.crc32(f"{sample}\x1f{mp}".encode())])
+
+
 def _reference_kappa(adata, keys: Keys, gene_sets: dict[str, list[str]], counts_layer: str | None,
                      min_cells: int, min_detect: float, min_genes: int, min_kappa: float = 0.02,
-                     n_null_floor: int = 20, seed: int = 0) -> list[tuple[np.ndarray, dict]]:
-    """Per malignant sample with >= ``min_cells`` cells (of nonzero total):
-    ``(rows, {set: (genes, kappa_real, floor)})``.
+                     n_null_floor: int = N_NULL_FLOOR, seed: int = 0) -> list[tuple[str, np.ndarray, dict]]:
+    """Per malignant sample with >= ``min_cells`` cells (of nonzero total): ``(sample, rows, {set: info})``.
 
-    A set's genes are those detected in >= ``min_detect`` of the sample's cells in the real data;
-    samples where fewer than ``min_genes`` qualify are left out for that set. ``floor`` is the
-    larger of ``min_kappa`` and the 95th percentile of ``kappa`` over ``n_null_floor`` random gene
-    sets matched on mean expression and detection (0 disables the null). The decoy is scored on
-    the same cells and genes.
+    A set's genes ``G`` are those detected in >= ``min_detect`` of the sample's cells in the real
+    data; samples where fewer than ``min_genes`` qualify are left out for that set. ``n_null_floor``
+    random gene sets are drawn from the sample's other eligible genes, matched gene by gene to ``G``
+    on mean expression and detection (:func:`mpaudit.coexpr.matched_random_sets`), from the (sample,
+    set)'s own stream (:func:`_set_rng`). ``info``: ``genes`` (``G``), ``sets`` (the random sets with a
+    finite kappa), ``kappa_sets`` (their kappa), ``k_real`` (kappa of ``G``), ``bg_real`` and
+    ``sd_real`` (median and SD, ddof 1, of ``kappa_sets``; NaN with fewer than ``MIN_FLOOR_SETS``) and
+    ``enter`` (``k_real - bg_real > max(min_kappa, EXCESS_ENTRY_SD * sd_real)``). Every kappa of a
+    sample comes from one :func:`mpaudit.coexpr.set_kappas` call. The decoy is scored on the same
+    cells, genes and random sets.
     """
-    rng = np.random.default_rng(seed)
+    if n_null_floor < MIN_FLOOR_SETS:
+        raise ValueError(f"n_null_floor must be >= {MIN_FLOOR_SETS} (a sample enters only with that many random "
+                         f"sets of finite kappa), got {n_null_floor}")
     X = get_counts(adata, counts_layer)
     mal = malignant_mask(adata, keys)
     samples = adata.obs[keys.sample].astype(str).to_numpy()
@@ -349,36 +409,49 @@ def _reference_kappa(adata, keys: Keys, gene_sets: dict[str, list[str]], counts_
         detect = np.asarray((Xs > 0).mean(axis=0)).ravel()
         mean_expr = np.asarray(Xs.sum(axis=0)).ravel() / totals.sum()
         eligible = detect >= min_detect
-        per_set = {}
+        drawn = {}
         for m, g in idx.items():
             g = g[eligible[g]]
-            if g.size < min_genes:
-                continue
-            k_real = kappa(Xs[:, g].toarray(), totals)
-            floor = min_kappa
-            if n_null_floor > 0 and np.isfinite(k_real) and k_real >= min_kappa:
-                nulls = [kappa(Xs[:, r].toarray(), totals) for r in
-                         matched_random_sets(g, mean_expr, detect, n_null_floor, rng, candidates=eligible)]
-                nulls = np.array([v for v in nulls if np.isfinite(v)])
-                if nulls.size:
-                    floor = max(floor, float(np.quantile(nulls, 0.95)))
-            per_set[m] = (g, k_real, floor)
-        refs.append((rows, per_set))
+            if g.size >= min_genes:
+                drawn[m] = (g, matched_random_sets(g, mean_expr, detect, n_null_floor, _set_rng(seed, s, m),
+                                                   candidates=eligible))
+        k = iter(set_kappas(Xs.tocsc(), totals, [x for g, rs in drawn.values() for x in (g, *rs)]))
+        per_set = {}
+        for m, (g, rs) in drawn.items():
+            k_real = next(k)
+            b = np.array([next(k) for _ in rs])
+            ok = np.isfinite(b)
+            info = {"genes": g, "sets": [r for r, o in zip(rs, ok) if o], "kappa_sets": b[ok], "k_real": k_real,
+                    "bg_real": np.nan, "sd_real": np.nan, "enter": False}
+            if ok.sum() >= MIN_FLOOR_SETS:
+                info["bg_real"], info["sd_real"] = float(np.median(b[ok])), float(np.std(b[ok], ddof=1))
+                with np.errstate(invalid="ignore"):
+                    info["enter"] = bool(k_real - info["bg_real"] > max(min_kappa, EXCESS_ENTRY_SD * info["sd_real"]))
+            per_set[m] = info
+        refs.append((s, rows, per_set))
     return refs
 
 
-def _retained_ratios(refs: list[tuple[np.ndarray, dict]], decoy_counts: sp.csr_matrix,
-                     min_kappa: float) -> dict[str, list[float]]:
-    """Per set: ``kappa_decoy / kappa_real`` over the samples where ``kappa_real`` exceeds its floor."""
+def _retained_ratios(refs: list[tuple[str, np.ndarray, dict]], decoy_counts: sp.csr_matrix) -> dict[str, list[float]]:
+    """Per set, over the entering samples: ``(kappa_decoy - bg_decoy) / (kappa_real - bg_real)``, ``bg`` the
+    median kappa of the sample's random sets (those of finite real kappa) on the decoy's or the real counts."""
     out: dict[str, list[float]] = {}
-    for rows, per_set in refs:
+    for _, rows, per_set in refs:
+        enter = {m: info for m, info in per_set.items() if info["enter"]}
+        if not enter:
+            continue
         D = decoy_counts[rows]
         totals = np.asarray(D.sum(axis=1)).ravel()
-        for m, (g, k_real, floor) in per_set.items():
-            if np.isfinite(k_real) and k_real >= max(min_kappa, floor):
-                ratio = kappa(D[:, g].toarray(), totals) / k_real
-                if np.isfinite(ratio):
-                    out.setdefault(m, []).append(ratio)
+        k = iter(set_kappas(D.tocsc(), totals, [x for info in enter.values() for x in (info["genes"], *info["sets"])]))
+        for m, info in enter.items():
+            k_dec = next(k)
+            b = np.array([next(k) for _ in info["sets"]])
+            b = b[np.isfinite(b)]
+            if not b.size:
+                continue
+            ratio = (k_dec - float(np.median(b))) / (info["k_real"] - info["bg_real"])
+            if np.isfinite(ratio):
+                out.setdefault(m, []).append(float(ratio))
     return out
 
 
@@ -389,22 +462,27 @@ def kappa_retained(
     gene_sets: dict[str, list[str]],
     *,
     counts_layer: str | None = None,
-    min_cells: int = 20,
+    min_cells: int = MIN_CELLS,
     min_kappa: float = 0.02,
-    min_detect: float = 0.05,
-    min_genes: int = 5,
-    n_null_floor: int = 20,
+    min_detect: float = MIN_DETECT,
+    min_genes: int = MIN_GENES,
+    n_null_floor: int = N_NULL_FLOOR,
     seed: int = 0,
 ) -> pd.DataFrame:
-    """Share of each gene set's co-expression one decoy keeps (no NMF; see the module docstring).
+    """Share of each gene set's co-expression, in excess of matched random gene sets, that one decoy keeps
+    (no NMF; see the module docstring).
 
     ``decoy`` is :func:`make_decoy` output for ``adata``. Columns: ``mp`` (set name),
-    ``kappa_retained`` (median over samples of ``kappa_decoy / kappa_real``; NaN when no sample's
-    ``kappa_real`` exceeds its floor) and ``n_samples`` (samples entering the median).
+    ``kappa_retained`` (median over the entering samples of ``(kappa_decoy - bg_decoy) / (kappa_real -
+    bg_real)``, ``bg`` the median kappa of ``n_null_floor`` matched random gene sets of the sample on
+    the same counts; a sample enters when ``kappa_real - bg_real > max(min_kappa, EXCESS_ENTRY_SD x SD
+    of the sets' real kappa)``, with >= ``MIN_FLOOR_SETS`` sets of finite kappa; NaN when no sample
+    enters) and ``n_samples`` (samples entering the median). ``seed`` seeds the random sets
+    (:func:`_set_rng`); :func:`decoy_recruitment` passes its own ``seed`` (1000 in the pipeline).
     """
     refs = _reference_kappa(adata, keys, gene_sets, counts_layer, min_cells, min_detect, min_genes,
                             min_kappa, n_null_floor, seed)
-    ratios = _retained_ratios(refs, get_counts(decoy, counts_layer), min_kappa)
+    ratios = _retained_ratios(refs, get_counts(decoy, counts_layer))
     return pd.DataFrame([{"mp": m, "kappa_retained": float(np.median(ratios[m])) if m in ratios else np.nan,
                           "n_samples": len(ratios.get(m, []))} for m in gene_sets])
 
@@ -417,10 +495,13 @@ def decoy_tag(adata, keys: Keys, **make_decoy_kwargs) -> str:
     Readable part: :data:`mpaudit.gavish.DECOY_TAG`, the method, the conditioning columns, the depth
     bins and the seed. Then a hash of every argument of :func:`make_decoy` (its defaults included, so
     passing another argument, or changing a default, gives another tag), of the sample and malignant
-    keys and of the values of the conditioning columns and the sample column in malignant cells. The
-    cache key adds the decoy counts' fingerprint and the decoy generator's code
-    (:func:`mpaudit.gavish.code_version`); the values matter because with ``method="permute"`` the
-    counts' totals stay the same when only the covariate values change.
+    keys, of the malignant cells' barcodes in order, and of the dtype and the values in malignant
+    cells of the sample column and of each conditioning column (:func:`make_decoy` treats a numeric
+    column and a categorical one with the same values differently). Only malignant cells enter, as
+    in :func:`make_decoy`, so adding or removing a TME cell keeps the tag. The cache key adds the
+    fingerprint of the decoy counts themselves (:func:`mpaudit.gavish.compute_programs`), which
+    changes with any change to them (also with ``method="permute"``, which keeps every total), and
+    the decoy generator's code (:func:`mpaudit.gavish.code_version`).
     """
     bound = inspect.signature(make_decoy).bind(adata, keys, **make_decoy_kwargs)
     bound.apply_defaults()
@@ -428,9 +509,9 @@ def decoy_tag(adata, keys: Keys, **make_decoy_kwargs) -> str:
     mal = malignant_mask(adata, keys)
     h = hashlib.sha1(repr(sorted((k, repr(v)) for k, v in args.items())).encode())
     h.update(repr((keys.sample, keys.malignant, keys.malignant_label)).encode())
-    h.update(np.packbits(mal).tobytes())
+    h.update("\x1f".join(np.asarray(adata.obs_names[mal]).astype(str)).encode())
     for col in (keys.sample, *args["strata"]):
-        h.update(col.encode())
+        h.update(f"{col}\x1f{adata.obs[col].dtype}".encode())
         h.update(pd.util.hash_pandas_object(adata.obs[col][mal], index=False).to_numpy().tobytes())
     return (f"{DECOY_TAG}{args['method']}-{'+'.join(args['strata'])}-d{args['n_depth_bins']}-s{args['seed']}-"
             f"{h.hexdigest()[:12]}")
@@ -451,9 +532,9 @@ def decoy_recruitment(
     cache: NMFCache | None = None,
     recurrence_key: str | None = None,
     min_jaccard: float = 0.3,
-    min_cells: int = 20,
+    min_cells: int = MIN_CELLS,
     min_kappa: float = 0.02,
-    n_null_floor: int = 20,
+    n_null_floor: int = N_NULL_FLOOR,
     seed: int = 1000,
     n_jobs: int = 1,
     log=print,
@@ -470,8 +551,11 @@ def decoy_recruitment(
 
     * ``per_mp``, one row per (MP, arm): ``mp``, ``arm``, ``n_decoys``, ``hits`` (decoys with an MP
       at Jaccard >= ``min_jaccard`` to the real MP), ``recruitment`` (``hits / n_decoys``),
-      ``mean_best_jaccard``, ``max_best_jaccard`` (best match per decoy, over decoys) and
-      ``kappa_retained`` (``min_cells``, ``min_kappa``, ``n_null_floor``: see the module docstring);
+      ``mean_best_jaccard``, ``max_best_jaccard`` (best match per decoy, over decoys),
+      ``kappa_retained`` (``min_cells``, ``min_kappa``, ``n_null_floor``: see the module docstring) and
+      ``kappa_retained_n_samples`` (samples entering it, decided on the real counts, so the same in
+      every arm; with 0, ``kappa_retained`` is NaN and the MP can neither meet criterion (a) nor be
+      typed dosage in the arm);
     * ``per_decoy``: ``arm``, ``decoy`` (cache tag), ``n_robust``, ``n_mps``, and the NMF fit
       diagnostics of the decoy cohort (``n_fits``, ``n_capped_fits`` stopped at ``max_iter``,
       ``n_failed_fits`` stopped by the restart limit; :class:`mpaudit.gavish.GavishResult`);
@@ -488,8 +572,10 @@ def decoy_recruitment(
     cache = cache or NMFCache()
     unit = sample_map(adata, keys, recurrence_key) if recurrence_key else None
     study = sample_map(adata, keys, keys.study) if keys.study else None
-    refs = _reference_kappa(adata, keys, real_mps, counts_layer, min_cells, min_detect=0.05, min_genes=5,
+    refs = _reference_kappa(adata, keys, real_mps, counts_layer, min_cells, min_detect=MIN_DETECT, min_genes=MIN_GENES,
                             min_kappa=min_kappa, n_null_floor=n_null_floor, seed=seed)
+    # samples entering kappa_retained per MP (decided on the real counts, so the same in every arm and decoy)
+    n_enter = {m: sum(bool(per_set.get(m, {}).get("enter")) for _, _, per_set in refs) for m in real_mps}
     rows, per_decoy, decoy_mps = [], [], {}
     for arm, arm_cols in arms.items():
         cols = tuple(sorted(set(arm_cols)))
@@ -500,7 +586,7 @@ def decoy_recruitment(
                           seed=seed + d)
             tag = decoy_tag(adata, keys, **kwargs)
             dec = make_decoy(adata, keys, **kwargs)
-            for m, ratios in _retained_ratios(refs, get_counts(dec, counts_layer), min_kappa).items():
+            for m, ratios in _retained_ratios(refs, get_counts(dec, counts_layer)).items():
                 retained[m].append(float(np.median(ratios)))
             spg = compute_programs(dec, keys, params, counts_layer=counts_layer, cache=cache, data_tag=tag,
                                    n_jobs=n_jobs)
@@ -521,5 +607,6 @@ def decoy_recruitment(
             hits = int((b >= min_jaccard).sum())
             rows.append({"mp": m, "arm": arm, "n_decoys": n_decoys, "hits": hits, "recruitment": hits / n_decoys,
                          "mean_best_jaccard": float(b.mean()), "max_best_jaccard": float(b.max()),
-                         "kappa_retained": float(np.mean(retained[m])) if retained[m] else np.nan})
+                         "kappa_retained": float(np.mean(retained[m])) if retained[m] else np.nan,
+                         "kappa_retained_n_samples": n_enter[m]})
     return pd.DataFrame(rows, columns=PER_MP_COLUMNS), pd.DataFrame(per_decoy, columns=PER_DECOY_COLUMNS), decoy_mps
