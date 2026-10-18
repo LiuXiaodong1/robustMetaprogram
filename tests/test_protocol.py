@@ -1,6 +1,7 @@
 """Axis A4 (mpaudit.protocol, P1-GO v1.3): paired Δlog κ, protocol-specific intensity controls, the two nulls, the
 self bound, equal κ-cell numbers and depths (no activity gate), and draws that do not depend on the MP list or the
 cell order."""
+import warnings
 from contextlib import nullcontext
 from functools import lru_cache
 
@@ -526,7 +527,8 @@ def test_patchy_program_on_three_replicate_tumours_is_a_documented_gap():
     """A program absent from 20% of the pieces (present: lognormal(0.4, 0.15); absent: N(0.02, 0.015)), paired and
     replicate tumours exchangeable, no protocol effect, 3 replicate tumours (the registered minimum): per tumour the
     t bound holds about 5%, but every paired tumour shares one bound estimated from a few heavy-tailed changes, so
-    losses cluster within the MP and P(c) on 4 paired tumours is about 0.04, above the 0.03 of normal laws
+    losses cluster within the MP and P(c) on 4 paired tumours is about 0.04, above the at most 0.025 of the other
+    synthetic laws
     (scripts/calibration ``C2-info``; docs/05_pilot_P1.md, Caveats). This pins the documented size of the gap."""
     rng = np.random.default_rng(7)
     n_mp, tum = 1500, [f"P{i}" for i in range(4)] + [f"R{i}" for i in range(3)]
@@ -869,6 +871,35 @@ def test_kappa_counts_thinned_to_the_tumours_lowest_median_depth():
     scaled.X = (get_counts(adata) * 1.5).astype(np.float32)
     with pytest.raises(ValueError, match="whole numbers"):
         per_sample_kappa(scaled, KEYS, gs, "fresh", "fixed")
+
+
+def test_normalised_mixed_or_duplicated_input_is_refused():
+    """The whole-number check covers every analysed cell, not only thinned ones: with CPM or normalize_total input
+    (equal per-cell totals) no sample is thinned, and with only the shallowest piece normalised it is the one left
+    unthinned. Repeated barcodes within a sample would make the κ draws depend on cell order."""
+    adata, sets = _cohort()
+    gs = {k: sets[k] for k in ("cycle", "hypoxia")}
+    X = get_counts(adata)
+    tot = np.asarray(X.sum(axis=1)).ravel()
+    tot[tot == 0] = 1
+    for scale in (1e6, 1e4):  # CPM / normalize_total in float64
+        a = adata.copy()
+        a.X = sp.csr_matrix(sp.diags(scale / tot) @ X)
+        with pytest.raises(ValueError, match="whole numbers"):
+            per_sample_kappa(a, KEYS, gs, "fresh", "fixed")
+    a = adata.copy()  # fixed pieces at 1,000 per cell (the shallowest), fresh pieces raw
+    a.X = sp.csr_matrix(sp.diags(np.where(a.obs["protocol"].to_numpy() == "fixed", 1000 / tot, 1.0)) @ X)
+    with pytest.raises(ValueError, match="whole numbers"):
+        per_sample_kappa(a, KEYS, gs, "fresh", "fixed")
+    a = adata.copy()
+    rows = np.flatnonzero(malignant_mask(a, KEYS) & (a.obs["sample"] == a.obs["sample"].iloc[0]).to_numpy())
+    names = a.obs_names.to_numpy().copy()
+    names[rows[1]] = names[rows[0]]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # anndata warns about non-unique obs_names
+        a.obs_names = names
+    with pytest.raises(ValueError, match="repeated obs_names"):
+        per_sample_kappa(a, KEYS, gs, "fresh", "fixed")
 
 
 def test_draws_do_not_depend_on_the_mp_list_or_the_cell_order():

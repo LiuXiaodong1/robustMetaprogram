@@ -156,12 +156,14 @@ import numpy as np
 import pandas as pd
 
 from .data import read_gmt
+from .coexpr import N_DETECT_BINS, N_MEAN_BINS
 from .decoy import EXCESS_ENTRY_SD, MIN_FLOOR_SETS, N_NULL_FLOOR
 from .decoy import MIN_CELLS as DECOY_MIN_CELLS
 from .decoy import MIN_DETECT as DECOY_MIN_DETECT
 from .decoy import MIN_GENES as DECOY_MIN_GENES
 from .protocol import (KAPPA_BOOT, KAPPA_FLOOR, KAPPA_MIN_EFFECT, KAPPA_SELF_Z, MAX_KAPPA_CELLS, MIN_CELLS, MIN_DETECT,
                        MIN_GENES, MIN_IOTA, MIN_PAIRS, MIN_RANDOM_SETS, NULL_ALPHA)
+from .tme import MIN_MARKERS, N_EXPR_BINS, N_SPEC_BINS, RHO_MAX
 
 RULE_VERSION = "P1-GO v1.3"
 RHO_SENSITIVITY = 1.5  # registered rho_hat factor of the sensitivity re-run (tme.rho_sensitivity)
@@ -227,7 +229,7 @@ FIXED_CONSTANTS = (
     ("protocol.KAPPA_SELF_Z", KAPPA_SELF_Z),        # z of the self bound
     ("protocol.MAX_KAPPA_CELLS", MAX_KAPPA_CELLS),  # κ cells per sample at most (else the tumour's smallest sample)
     ("protocol.MIN_CELLS", MIN_CELLS),              # malignant cells a sample needs for (c)
-    ("protocol.MIN_DETECT", MIN_DETECT),            # panel: detected in >= this share of cells under each protocol
+    ("protocol.MIN_DETECT", MIN_DETECT),            # panel: detected in >= this share of κ cells, each protocol
     ("protocol.MIN_IOTA", MIN_IOTA),                # panel retention below which the MP's κ is undefined
     ("protocol.MIN_GENES", MIN_GENES),              # panel genes needed for κ
     ("decoy.EXCESS_ENTRY_SD", EXCESS_ENTRY_SD),     # kappa_retained entry: excess > this many SDs of the sets
@@ -235,6 +237,12 @@ FIXED_CONSTANTS = (
     ("decoy.MIN_CELLS", DECOY_MIN_CELLS),           # kappa_retained: cells a sample needs
     ("decoy.MIN_DETECT", DECOY_MIN_DETECT),         # kappa_retained: the MP's genes detected in >= this share ...
     ("decoy.MIN_GENES", DECOY_MIN_GENES),           # ... at least this many of them
+    ("coexpr.N_MEAN_BINS", N_MEAN_BINS),            # random sets of (a) and (c): mean-expression bins ...
+    ("coexpr.N_DETECT_BINS", N_DETECT_BINS),        # ... times detection bins
+    ("tme.MIN_MARKERS", MIN_MARKERS),               # (b): malignant-specific markers needed to adjust spillover
+    ("tme.RHO_MAX", RHO_MAX),                       # (b): cap on rho_hat, also in the x rho_sensitivity re-run
+    ("tme.N_EXPR_BINS", N_EXPR_BINS),               # (b): random-set null, expression bins ...
+    ("tme.N_SPEC_BINS", N_SPEC_BINS),               # ... times malignant-specificity bins
 )
 # keyword of rule_text -> the registered setting it states
 _RULE_TEXT_SETTINGS = {"n_decoys": "decoy.n", "min_kappa": "decoy.min_kappa", "n_null_floor": "decoy.n_null_floor",
@@ -685,18 +693,21 @@ def rule_text(rule: dict | None = None, *, n_decoys: int = 5, min_kappa: float =
         f"co-expression in excess of matched random gene sets that the decoys keep: per malignant sample of >= "
         f"{DECOY_MIN_CELLS} cells, on the MP's genes detected in >= {DECOY_MIN_DETECT:.0%} of its cells (at least "
         f"{DECOY_MIN_GENES}), (kappa_decoy - bg_decoy) / (kappa_real - bg_real), bg the median kappa of "
-        f"{n_null_floor} random gene sets matched on mean expression and detection, its median over the samples "
+        f"{n_null_floor} random gene sets matched on mean expression and detection ({N_MEAN_BINS} x "
+        f"{N_DETECT_BINS} bins), its median over the samples "
         f"where kappa_real - bg_real > "
         f"max({min_kappa:g}, {EXCESS_ENTRY_SD:g} SD of the sets' kappa) with >= {MIN_FLOOR_SETS} sets of finite "
         f"kappa, averaged over the arm's decoys (undefined, so no hit, when no sample qualifies); or (b) a "
-        f"spillover-adjusted (spill_adjusted) TME association with slope > 0 and partial R^2 above the "
-        f"random-gene-set {a1} in >= {r['min_a1_samples']} samples{rho}, for MPs not pre-declared as expected "
+        f"spillover-adjusted (spill_adjusted: only with >= {MIN_MARKERS} malignant-specific markers; rho_hat "
+        f"capped at {RHO_MAX:g}) TME association with slope > 0 and partial R^2 above the {a1} of random gene "
+        f"sets matched on expression and malignant specificity ({N_EXPR_BINS} x {N_SPEC_BINS} bins) in >= "
+        f"{r['min_a1_samples']} samples{rho}, for MPs not pre-declared as expected "
         f"TME-shared (named, or overlapping a pre-declared gene set by >= {r['min_overlap']} genes); or (c) a "
         f"one-sided kappa loss under the dissociation-free protocol in >= {r['protocol_frac']:g} of >= "
         f"{r['min_paired_tumours']} tested paired tumours, a tumour's loss being a change in log kappa (test - "
         f"reference; kappa floored at {KAPPA_FLOOR:g}) below the null bound, below the self bound{margin}. Kappa "
-        f"is that of the MP's genes in the tumour's panel (detected in >= {MIN_DETECT:.0%} of its malignant cells "
-        f"under each protocol; undefined with fewer than {MIN_GENES} panel genes or less than {MIN_IOTA:g} of the "
+        f"is that of the MP's genes in the tumour's panel (detected in >= {MIN_DETECT:.0%} of its kappa cells, "
+        f"after thinning, under each protocol; undefined with fewer than {MIN_GENES} panel genes or less than {MIN_IOTA:g} of the "
         f"MP's genes in the panel), in samples of >= {MIN_CELLS} malignant cells. Every paired tumour with a "
         f"defined change, null bound and self bound is tested (no activity gate); every sample of a tumour is "
         f"scored on the same number of cells (the tumour's smallest sample, at most {MAX_KAPPA_CELLS}), their "
@@ -705,7 +716,8 @@ def rule_text(rule: dict | None = None, *, n_decoys: int = 5, min_kappa: float =
         f"{level:.0%} t prediction bounds, on the linear kappa changes (carried to the MP's kappa level) and on the "
         f"log kappa changes; otherwise the k-th smallest linear kappa change, k = floor({NULL_ALPHA:g} (n + 1)), of "
         f"the n >= {MIN_RANDOM_SETS} random gene sets with a defined change ({n_null_sets} drawn per tumour and MP, "
-        f"matched on mean expression and detection), carried to the MP's kappa level, a tumour whose k-th smallest "
+        f"matched on mean expression and detection, {N_MEAN_BINS} x {N_DETECT_BINS} bins), carried to the MP's "
+        f"kappa level, a tumour whose k-th smallest "
         f"change is not below its k-th largest not being tested. The self bound is -{KAPPA_SELF_Z:g} times the "
         f"bootstrap SE ({KAPPA_BOOT} resamples of each sample's cells, drawn per seed, sample and MP) of the MP's "
         f"own linear kappa change, carried to its kappa level; a tumour with an undefined SE is not tested. Curated "

@@ -192,14 +192,18 @@ def set_kappas(counts, s: np.ndarray, sets: list[np.ndarray], chunk: int = 1024,
     return out
 
 
+N_MEAN_BINS = 20  # matched random gene sets: mean-expression bins ...
+N_DETECT_BINS = 3  # ... times detection-rate bins (P1 rule constants: kappa_retained and criterion (c))
+
+
 def matched_random_sets(
     target: np.ndarray,
     mean_expr: np.ndarray,
     detect: np.ndarray,
     n_sets: int,
     rng: np.random.Generator,
-    n_mean_bins: int = 20,
-    n_detect_bins: int = 3,
+    n_mean_bins: int = N_MEAN_BINS,
+    n_detect_bins: int = N_DETECT_BINS,
     candidates: np.ndarray | None = None,
 ) -> list[np.ndarray]:
     """Random gene sets matched gene-by-gene on mean-expression and detection-rate bins."""

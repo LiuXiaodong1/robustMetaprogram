@@ -168,6 +168,8 @@ PER_SET_COLUMNS = ["mp", "n_samples", "partial_r2", "slope", "partial_r2_lo", "p
                    "kappa_ratio_median", "kappa_ratio_n"]
 MIN_MARKERS = 5  # fewer malignant-specific markers: spillover is not adjusted (with a warning)
 RHO_MAX = 0.99  # cap on rho_hat (also after rho_sensitivity scaling); < 1 keeps the native profile finite
+N_EXPR_BINS = 30  # random-set null of (b): malignant mean log expression bins ...
+N_SPEC_BINS = 5  # ... times malignant-specificity quantile bins within each
 NULL_MATCH = ("expression+specificity", "expression")
 _PSEUDO_CPM10 = 0.1  # 1 CPM on the CPM/10 scale
 
@@ -298,8 +300,8 @@ def tme_covariation(
     rho_sensitivity: float | None = 1.5,
     kappa_ratio: bool = True,
     max_kappa_cells: int = 2000,
-    n_bins: int = 30,
-    n_spec_bins: int = 5,
+    n_bins: int = N_EXPR_BINS,
+    n_spec_bins: int = N_SPEC_BINS,
     n_ctrl: int = 100,
     seed: int = 0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:

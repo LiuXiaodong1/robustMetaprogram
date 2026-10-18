@@ -309,7 +309,7 @@ def test_rule_text_follows_the_settings():
                      kappa_min_effect=float(np.log(2)), rho_sensitivity=2.0, min_pairs=5, n_null_sets=200,
                      min_kappa=0.05, n_null_floor=60, min_jaccard=0.4)
     for part in ["recruits the MP (a decoy MP at Jaccard >= 0.4 to it) in >= 3 of its 5 decoys (>= 6 needed)",
-                 "dosage decoy arm (clone) with >= 3 hits", "random-gene-set null_q95", "multiplied by 2",
+                 "dosage decoy arm (clone) with >= 3 hits", "above the null_q95 of random gene sets", "multiplied by 2",
                  "partial_r2_rho > null_q95_rho", "by more than 0.693 in log kappa (a 2-fold loss)",
                  "whatever the number of decoys", "replicate pairs from >= 5 distinct tumours",
                  "(200 drawn per tumour and MP",
@@ -349,8 +349,8 @@ def test_rule_text_states_nulls_self_bound_jaccard_power_and_informational_items
                  "Every paired tumour with a defined change, null bound and self bound is tested (no activity gate)",
                  "every sample of a tumour is scored on the same number of cells (the tumour's smallest sample, at "
                  "most 2000), their counts binomially thinned to the tumour's lowest median count per cell",
-                 "Kappa is that of the MP's genes in the tumour's panel (detected in >= 5% of its malignant cells "
-                 "under each protocol; undefined with fewer than 5 panel genes or less than 0.5 of the MP's genes in "
+                 "Kappa is that of the MP's genes in the tumour's panel (detected in >= 5% of its kappa cells, after "
+                 "thinning, under each protocol; undefined with fewer than 5 panel genes or less than 0.5 of the MP's genes in "
                  "the panel), in samples of >= 20 malignant cells",
                  "with same-protocol replicate pairs from >= 3 distinct tumours, the lower of two one-sided 95% t "
                  "prediction bounds, on the linear kappa changes (carried to the MP's kappa level) and on the log "
@@ -389,14 +389,19 @@ def test_fixed_constants_of_the_rule():
                                      "protocol.MIN_CELLS": 20, "protocol.MIN_DETECT": 0.05, "protocol.MIN_IOTA": 0.5,
                                      "protocol.MIN_GENES": 5, "decoy.EXCESS_ENTRY_SD": 3.0,
                                      "decoy.MIN_FLOOR_SETS": 20, "decoy.MIN_CELLS": 20, "decoy.MIN_DETECT": 0.05,
-                                     "decoy.MIN_GENES": 5}
+                                     "decoy.MIN_GENES": 5, "coexpr.N_MEAN_BINS": 20, "coexpr.N_DETECT_BINS": 3,
+                                     "tme.MIN_MARKERS": 5, "tme.RHO_MAX": 0.99, "tme.N_EXPR_BINS": 30,
+                                     "tme.N_SPEC_BINS": 5}
     import inspect
 
+    import mpaudit.coexpr
     import mpaudit.decoy
     import mpaudit.protocol
+    import mpaudit.tme
+    modules = {"protocol": mpaudit.protocol, "decoy": mpaudit.decoy, "coexpr": mpaudit.coexpr, "tme": mpaudit.tme}
     for name, value in FIXED_CONSTANTS:
         module, attr = name.split(".")
-        assert getattr({"protocol": mpaudit.protocol, "decoy": mpaudit.decoy}[module], attr) == value
+        assert getattr(modules[module], attr) == value
 
     def defaults(fn):
         return {k: v.default for k, v in inspect.signature(fn).parameters.items()}
@@ -414,6 +419,9 @@ def test_fixed_constants_of_the_rule():
     registered = dict(REGISTERED_SETTINGS)
     assert registered["decoy.n_null_floor"] == 50 and registered["decoy.min_kappa"] == 0.02
     assert "protocol.kappa_active" not in registered  # informational only in v1.3
+    assert (defaults(mpaudit.coexpr.matched_random_sets)["n_mean_bins"],
+            defaults(mpaudit.coexpr.matched_random_sets)["n_detect_bins"]) == (20, 3)
+    assert (defaults(mpaudit.tme.tme_covariation)["n_bins"], defaults(mpaudit.tme.tme_covariation)["n_spec_bins"]) == (30, 5)
 
 
 def test_decide_labels_deviations_from_the_registered_rule():

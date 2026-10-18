@@ -36,7 +36,8 @@ import numpy as np
 import pandas as pd
 
 from .compare import jaccard_matrix, match_sets
-from .data import QC_COLUMNS, Keys, add_qc_obs, malignant_mask, read_gmt, sample_map, write_gmt
+from .data import (QC_COLUMNS, Keys, add_qc_obs, get_counts, malignant_mask, read_gmt, require_whole_counts,
+                   sample_map, write_gmt)
 from .decoy import MIN_FLOOR_SETS, N_NULL_FLOOR, decoy_recruitment
 from .gavish import GavishParams, NMFCache, check_keys, code_version, eligible_universe, run_gavish
 from .instability import default_perturbations, run_instability
@@ -334,7 +335,9 @@ def validate_config(cfg: dict, adata=None, log=print) -> dict:
     ``decision``, ``keys`` and ``gavish`` (:func:`_check_known_keys`; those three refuse unknown
     keys themselves); an invalid ``decision`` block (:func:`mpaudit.report.validate_rule`);
     with ``adata``, a key (``keys.*``) naming no column of ``adata.obs`` (warned about instead for
-    the informational keys ``clone``, ``region``, ``doublet`` and ``intronic``); a switch
+    the informational keys ``clone``, ``region``, ``doublet`` and ``intronic``), a ``counts_layer``
+    that is not a layer, or malignant-cell counts that are not whole numbers >= 0
+    (:func:`mpaudit.data.require_whole_counts`: CPM, ``normalize_total`` or log values); a switch
     (``*.enabled``, ``qc.add_obs``, ``instability.leave_one_study_out``) that is not true/false;
     ``decoy.strata`` (legacy; use ``decoy.arms``); a decoy arm named in neither
     ``decision.technical_arms`` nor ``decision.dosage_arms``; decoy arm columns missing from
@@ -384,6 +387,12 @@ def validate_config(cfg: dict, adata=None, log=print) -> dict:
         if ignored:
             _warn(f"not a column of adata.obs, ignored (informational keys: the rule does not read them): "
                   f"{', '.join(ignored)}", log)
+        # decoys, κ and the protocol axis's thinning assume raw UMI counts: refuse normalised input before any NMF
+        layer = cfg.get("counts_layer")
+        if layer and layer not in adata.layers:
+            raise ValueError(f"counts_layer {layer!r} is not a layer of adata (layers: {sorted(adata.layers)})")
+        require_whole_counts(get_counts(adata, layer)[malignant_mask(adata, keys)],
+                             f"the malignant cells' counts ({'layer ' + repr(layer) if layer else 'adata.X'})")
     for sec, key in _SWITCHES:
         cfg[sec][key] = _flag(sec, key, cfg[sec].get(key, DEFAULT_CONFIG[sec][key]))
 

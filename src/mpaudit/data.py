@@ -64,6 +64,18 @@ def get_counts(adata, layer: str | None = None) -> sp.csr_matrix:
     return X
 
 
+def require_whole_counts(X, what: str = "counts") -> None:
+    """Raise ``ValueError`` unless every stored value of ``X`` is a whole number >= 0.
+
+    The decoys (Poisson mean model), κ (Poisson moment correction) and the protocol axis (binomial
+    thinning to equal depth) all assume raw UMI counts. Normalised values (CPM, ``normalize_total``,
+    log1p) are refused; checked on every stored value, not only where they would be thinned."""
+    data = X.data if sp.issparse(X) else np.asarray(X).ravel()
+    if data.size and (np.any(data < 0) or np.any(np.abs(data - np.rint(data)) > 1e-6)):
+        raise ValueError(f"{what} must be raw UMI counts (whole numbers >= 0); found normalised or negative "
+                         "values: give the raw counts (counts_layer)")
+
+
 def malignant_mask(adata, keys: Keys) -> np.ndarray:
     """Boolean mask of malignant cells from a bool/0-1 column or a label column."""
     col = adata.obs[keys.malignant]

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.sparse as sp
 
 from mpaudit import Keys, cli, pipeline
 from mpaudit.coexpr import kappa
@@ -263,6 +264,28 @@ def test_bad_config_fails_before_any_nmf(small, tmp_path, monkeypatch, change, m
     cfg = {k: dict(v) if isinstance(v, dict) else v for k, v in BASE.items()}
     for k, v in sub(change).items():
         cfg[k] = {**cfg[k], **v} if isinstance(cfg.get(k), dict) else v
+    monkeypatch.setattr(pipeline, "run_gavish", _no_nmf)
+    with pytest.raises(ValueError, match=message):
+        run_p1(adata, cfg, tmp_path / "out", log=lambda *a: None)
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("kind", ["cpm", "normalize_total", "missing_layer"])
+def test_normalised_counts_are_refused_before_any_nmf(small, tmp_path, monkeypatch, kind):
+    """Decoys, κ and the protocol axis's thinning assume raw UMI counts: normalised counts (equal per-cell totals,
+    so the protocol axis would thin nothing) or a missing counts layer stop the run before any NMF."""
+    adata, _ = small
+    adata = adata.copy()
+    cfg = {**BASE, "unregistered_variant": True}
+    if kind == "missing_layer":
+        cfg["counts_layer"] = "no_such_layer"
+        message = "not a layer"
+    else:
+        X = get_counts(adata, "counts")
+        tot = np.asarray(X.sum(axis=1)).ravel()
+        tot[tot == 0] = 1
+        adata.layers["counts"] = sp.csr_matrix(sp.diags((1e6 if kind == "cpm" else 1e4) / tot) @ X)
+        message = "raw UMI counts"
     monkeypatch.setattr(pipeline, "run_gavish", _no_nmf)
     with pytest.raises(ValueError, match=message):
         run_p1(adata, cfg, tmp_path / "out", log=lambda *a: None)

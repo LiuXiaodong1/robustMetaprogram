@@ -199,9 +199,12 @@ Constants of the rule that are fixed in code, not set in the config (`mpaudit.re
 | `protocol.MIN_RANDOM_SETS` | 20 | random sets with a defined change needed for a tumour's random-set bound (then k = 1) |
 | `protocol.KAPPA_BOOT`, `protocol.KAPPA_SELF_Z` | 50, 1.645 | bootstrap resamples behind the self bound, and its z |
 | `protocol.MAX_KAPPA_CELLS` | 2000 | κ cells per sample at most (otherwise the tumour's smallest sample) |
-| `protocol.MIN_CELLS`, `protocol.MIN_DETECT`, `protocol.MIN_GENES`, `protocol.MIN_IOTA` | 20, 0.05, 5, 0.5 | (c)'s samples and panel: malignant cells a sample needs, detection of a panel gene under each protocol, panel genes and panel retention needed for κ |
+| `protocol.MIN_CELLS`, `protocol.MIN_DETECT`, `protocol.MIN_GENES`, `protocol.MIN_IOTA` | 20, 0.05, 5, 0.5 | (c)'s samples and panel: malignant cells a sample needs, detection of a panel gene under each protocol, panel genes and panel retention needed for κ; the panel is taken on the tumour's κ cells after thinning |
 | `decoy.EXCESS_ENTRY_SD`, `decoy.MIN_FLOOR_SETS` | 3, 20 | `kappa_retained` entry: an excess above 3 SD of the sets' κ, from ≥ 20 sets with a finite κ |
 | `decoy.MIN_CELLS`, `decoy.MIN_DETECT`, `decoy.MIN_GENES` | 20, 0.05, 5 | `kappa_retained`'s samples and gene set G: cells a sample needs, detection of a gene of G, genes of G needed |
+| `coexpr.N_MEAN_BINS`, `coexpr.N_DETECT_BINS` | 20, 3 | random gene sets of (a) and (c): matched gene by gene on 20 mean-expression × 3 detection bins |
+| `tme.MIN_MARKERS`, `tme.RHO_MAX` | 5, 0.99 | (b): malignant-specific markers needed to adjust spillover, and the cap on ρ̂ (also in the ×1.5 re-run) |
+| `tme.N_EXPR_BINS`, `tme.N_SPEC_BINS` | 30, 5 | (b): random-set null matched on 30 expression × 5 malignant-specificity bins |
 
 The functions that apply these constants take them as defaults, and the tests check that too. Also fixed in code:
 equal κ cells and equal depth per tumour (above) and the random streams: random sets of (c) per seed, tumour and MP;
@@ -245,7 +248,10 @@ command line, everything that does not need the cohort's `obs` columns is checke
   not a mapping, and unknown `decision`, `keys` and `gavish` keys (the pre-v1.0 decision keys `recruitment`,
   `partial_r2` and `protocol_frac_beyond_null` are named with their replacements);
 - with the cohort given, a `keys.*` entry that names no `obs` column (for `keys.clone`, `region`, `doublet` and
-  `intronic`, which only the informational typer reads, or nothing, a warning instead);
+  `intronic`, which only the informational typer reads, or nothing, a warning instead), a `counts_layer` that is
+  not a layer, and malignant-cell counts that are not whole numbers ≥ 0 (CPM, `normalize_total` or log values):
+  the decoys, κ and the protocol axis's depth thinning all assume raw UMI counts (the protocol axis checks every
+  analysed cell again, and refuses repeated barcodes within a sample, on which its cell draws depend);
 - values of the wrong type or out of range: a single name for a list key is accepted; every `enabled` switch,
   `qc.add_obs`, `instability.leave_one_study_out`, `tme.spillover_adjust` and `unregistered_variant` must be true
   or false; `decoy.n`, `decoy.n_depth_bins`, `decoy.n_null_floor`, `tme.n_null`, `tme.min_cells`, `tme.n_markers`,
@@ -536,7 +542,7 @@ not evidence about the stability of 3CA MPs (more than 1,000 tumours in dozens o
     CNA_7q in T03 and EMT in T04, tumours without the program, fell from κ 0.18–0.24 to 0.05 under the real
     protocol and were called losses; no criterion (c) resulted. On the toy null the random-set path is calibrated
     at about the nominal level with little slack (0.063 of the tested pairs without the program over 12 seeds,
-    0.058 over 36; target 0.065; `scripts/calibration/README.md`).
+    0.058 over 36, where one 5-tumour half of a private program met (c); target 0.065; `scripts/calibration/README.md`).
   - *Depth differences between tumours.* Equal depth acts within a tumour. The replicate null comes from other
     tumours at their own depth; on the toy, paired tumours at a quarter of the replicate tumours' depth stayed
     within target (above), but a larger gap is not covered by construction.
@@ -560,7 +566,7 @@ not evidence about the stability of 3CA MPs (more than 1,000 tumours in dozens o
 - **What (c) can and cannot detect.** Without the gate, tumours that lack a program count in the denominator of
   (c). An MP present in fewer than half of the paired tumours therefore cannot meet (c), however strongly it is
   lost where present. Such subset nuisance programs can reach support only through (a) or (b). This is conservative
-  for GO, but it under-detects real subset nuisance. In the calibration harness a planted κ drop of about 36–48%
+  for GO, but it under-detects real subset nuisance. In the calibration harness a planted κ drop of about 36–43% (EMT; 36–48% over both programs)
   in EMT, in the paired tumours that carry it (about half), met (c) in 0, 0, 2 and 2 of 6 runs (two drop sizes ×
   two null paths; v1.2: 2, 0, 5 and 3). On the replicate path, EMT was detected in 0.18 of the injected tumours at
   the smaller drop and 0.53 at the larger one (random-set path: 0.47 and 0.83); replicate pairs at the floor widen
@@ -581,9 +587,9 @@ not evidence about the stability of 3CA MPs (more than 1,000 tumours in dozens o
   - Toy null (pseudo-paired pieces with no protocol effect; 12 seeds × 11 gene sets at both toy magnitudes; 10
     paired tumours on the random-set path, also split into halves of 5, and 5 paired plus 5 replicate tumours on
     the replicate path): 0.019–0.063 of the tested pairs without the program and none of the pairs with it are
-    losses, and no gene set met (c). With the test pieces at a half or a quarter of the reference depth: 0.022–0.050
-    and at most 0.017 of the carriers; with 50–60-cell pieces: 0.022–0.043 and at most 0.020 of the carriers; no
-    gene set met (c).
+    losses, and no gene set met (c) over these 12 seeds (in 24 further seeds one 5-tumour half did (private_T01 on T06–T10 at seed 25: 3 of 5 tumours without the program lost; 1 of 96 private-program halves)). With the test pieces at a half or a
+    quarter of the reference depth: 0.022–0.050 and at most 0.017 of the carriers; with 50–60-cell pieces:
+    0.022–0.043 and at most 0.020 of the carriers; no gene set met (c).
 
   These rates hold under the stated assumptions. They do not cover regional heterogeneity of a present MP on the
   random-set path (above), for which the margin is the only protection (for a weak MP, κ 0.05–0.2, a 1.5-fold

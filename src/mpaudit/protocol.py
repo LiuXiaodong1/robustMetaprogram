@@ -20,7 +20,8 @@ of the MP's genes in the tumour's shared panel, computed on the sample's κ cell
 * *Equal depth.* The κ cells' counts of every sample of a tumour are binomially thinned to the
   tumour's lowest median total count per cell (each count ``y`` becomes a ``Binomial(y, p)`` draw,
   ``p`` = the tumour's lowest ``median_umi`` / the sample's, reported as ``kappa_thin``; stream
-  :func:`_depth_rng`; whole-number counts are required). κ's moment estimate falls as counts per cell
+  :func:`_depth_rng`; whole-number counts are required and checked for every analysed cell, thinned or
+  not, and by the pipeline's config check before any NMF). κ's moment estimate falls as counts per cell
   fall, more for weakly co-expressed sets: on the toy null (seed 0, every sample) thinning the same
   cells to a quarter of their depth gave κ x 0.75-0.92 for cycle, hypoxia and stress and x 0.48-0.60
   for random 40-gene sets (median ratio over the 20 samples; run of 2026-10-18). Without equal
@@ -120,9 +121,9 @@ heterogeneity, but most public protocol twins have no replicate pieces, and the 
 near-normal changes: for a program absent from a share of the pieces (patchy), the changes are a
 mixture of small ones and drops to the floor, all paired tumours share one bound estimated from a
 few such changes, and losses cluster within the MP. Per tumour the rate stays near 5%, but with 3
-replicate tumours the chance that such an MP meets criterion (c) on 4 paired tumours was 0.024-0.042
-(absent from 10-30% of pieces; synthetic, ``scripts/calibration`` ``C2-info``), against at most
-about 0.02 for normal laws.
+replicate tumours (the registered minimum) the chance that such an MP meets criterion (c) on 4 paired
+tumours was 0.031-0.047, and 0.024-0.030 with 6 (absent from 10-30% of pieces; synthetic,
+``scripts/calibration`` ``C2-info``), against at most 0.025 for the other laws.
 
 ``random_sets`` (null bound), otherwise: per paired tumour, ``n_null_sets`` random gene sets drawn
 from the tumour's panel, matched gene by gene to the MP's panel genes on mean-expression and
@@ -188,7 +189,8 @@ self bound.
 v1.3 reference results are in its README: on exchangeable synthetic laws 0.018-0.054 of the tested
 tumours are losses (v1.2: up to 0.31), the chance that an unaffected MP meets (c) is at most 0.025 on
 4 paired tumours (0.003 on 10), and on the toy null 0.019-0.063 of the tested pairs without the
-program are losses, none with it, and no gene set meets (c); with the test pieces at a half or a
+program are losses, none with it, and no gene set meets (c) over the 12 reference seeds (in 24 further
+seeds one 5-tumour half of a private program did); with the test pieces at a half or a
 quarter of the reference depth 0.022-0.050 of the pairs without the program and at most 0.017 of the
 carriers are losses, and with 50-60-cell pieces at most 0.043 and 0.020. Residual gaps: regional
 heterogeneity of a present program on the random-set path (only the margin covers it), a program
@@ -224,7 +226,7 @@ import scipy.sparse as sp
 from scipy import stats
 
 from .coexpr import kappa, matched_random_sets, resample_kappas, set_kappas
-from .data import Keys, get_counts, log2_cpm10, malignant_mask
+from .data import Keys, get_counts, log2_cpm10, malignant_mask, require_whole_counts
 
 KAPPA_FLOOR = 0.01
 KAPPA_MIN_EFFECT = float(np.log(1.5))  # smallest |Δlog κ| counted as a loss or gain (the proposal's margin)
@@ -236,7 +238,7 @@ KAPPA_BOOT = 50  # bootstrap resamples of a sample's κ cells for the SE of the 
 KAPPA_SELF_Z = 1.645  # self bound: a κ loss must also exceed KAPPA_SELF_Z x the SE of the MP's own change
 MAX_KAPPA_CELLS = 2000  # κ cells per sample: the tumour's smallest sample, at most this many
 MIN_CELLS = 20  # malignant cells a sample needs to enter the comparison
-MIN_DETECT = 0.05  # panel: genes detected in >= this share of the tumour's malignant cells under each protocol
+MIN_DETECT = 0.05  # panel: genes detected in >= this share of the tumour's κ cells (after thinning), each protocol
 MIN_IOTA = 0.5  # the MP's κ in a tumour is undefined when less than this share of its genes is in the panel
 MIN_GENES = 5  # ... or when fewer than this many of its genes are
 N_BINS = 30  # expression bins for control genes, as in mpaudit.scoring
@@ -382,6 +384,8 @@ def _prepare(adata, keys: Keys, reference: str, test: str, *, counts_layer: str 
     cells &= np.isin(sample, n_per_sample.index[n_per_sample >= min_cells])
     rows = np.flatnonzero(cells)
     counts, totals = counts[rows], totals[rows]
+    # every analysed cell, not only those thinned below: with normalised input (equal totals) nothing is thinned
+    require_whole_counts(counts, "the counts of the malignant cells of the protocol axis")
     protocol, sample, tumour = protocol[rows], sample[rows], tumour[rows]
     barcode = adata.obs_names.astype(str).to_numpy()[rows]
 
@@ -390,6 +394,9 @@ def _prepare(adata, keys: Keys, reference: str, test: str, *, counts_layer: str 
         r = np.flatnonzero(sample == s)
         if np.unique(protocol[r]).size > 1:
             raise ValueError(f"sample {s!r} has malignant cells under both protocols")
+        if pd.Index(barcode[r]).has_duplicates:
+            raise ValueError(f"sample {s!r} has repeated obs_names among its malignant cells; give every cell a "
+                             "unique barcode (e.g. a library suffix) so the κ draws do not depend on cell order")
         r = r[np.argsort(barcode[r], kind="stable")]  # barcode order: the draws below ignore the cohort's cell order
         samples.append(_Sample(s, tumour[r[0]], protocol[r[0]], r, r))
     # κ falls with the number of cells it is computed on, so every sample of a tumour is scored on the same
@@ -559,7 +566,8 @@ def per_sample_kappa(
     panel genes), ``kappa_se`` (bootstrap SE of ``kappa`` over ``KAPPA_BOOT`` resamples of the κ cells;
     computed for samples of paired tumours only, the only ones tested, and NaN elsewhere, where
     ``kappa`` is, or with fewer than 2 finite resamples), ``intensity``, ``prevalence``. Each sample
-    must have one protocol, and the counts must be whole numbers (UMI counts) for the thinning.
+    must have one protocol, its malignant cells unique barcodes (the cell draws follow barcode order), and the
+    counts of every analysed cell must be whole numbers (UMI counts) for the thinning.
     """
     cohort = _prepare(adata, keys, reference, test, counts_layer=counts_layer, min_cells=min_cells,
                       max_cells=max_cells, min_detect=min_detect, seed=seed)
